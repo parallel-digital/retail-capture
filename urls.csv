@@ -1,5 +1,5 @@
-url,retailer,page_type,name
-https://www.amazon.com/gp/bestsellers/,amazon,bestsellers,amazon-bestsellers
-https://www.amazon.com/s?k=wireless+earbuds,amazon,search,amazon-search-earbuds
-https://www.amazon.com/deals,amazon,deals,amazon-deals
-https://www.walmart.com/shop/deals,walmart,deals,walmart-deals
+account,url,retailer,page_type,name
+Account A,https://www.amazon.com/gp/bestsellers/,amazon,bestsellers,amazon-bestsellers
+Account A,https://www.amazon.com/s?k=wireless+earbuds,amazon,search,amazon-search-earbuds
+Account B,https://www.amazon.com/deals,amazon,deals,amazon-deals
+Account B,https://www.walmart.com/shop/deals,walmart,deals,walmart-deals

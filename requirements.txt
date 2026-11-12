@@ -1,6 +1,7 @@
 playwright>=1.47
 pyyaml
 pandas
+openpyxl
 streamlit
 streamlit-cropper
 pillow

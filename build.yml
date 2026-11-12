@@ -17,7 +17,7 @@ jobs:
           pyinstaller --noconfirm --onedir --name RetailCapture \
             --collect-all streamlit --collect-all playwright --collect-all streamlit_cropper \
             --copy-metadata streamlit \
-            --hidden-import PIL --hidden-import pandas --hidden-import yaml \
+            --hidden-import PIL --hidden-import pandas --hidden-import yaml --hidden-import openpyxl \
             --add-data "app.py;." --add-data "config.yaml;." --add-data "urls.csv;." \
             launcher.py
       - run: choco install innosetup -y

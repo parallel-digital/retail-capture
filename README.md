@@ -31,3 +31,9 @@ Download `RetailCapture-Setup.exe` from the run's Artifacts. Installs per-user (
 - First time: click "One-time browser setup" in the Run tab.
 - Settings, URL list, browser profile and captures live in C:\Users\<you>\RetailCapture.
 - Scheduling: Task Scheduler action = `RetailCapture.exe --capture`
+
+## Accounts, import, and saving to SharePoint
+- Import a CSV/Excel list in the Run tab. Columns: account, url, retailer, page_type, name (only url required).
+- Captures are saved as `<save folder>/<account>/<date>/<time>/<retailer>/<name>/`.
+- To save to SharePoint: in the SharePoint library click Sync (or "Add shortcut to OneDrive"), then paste that
+  local folder path into Settings > Save location. OneDrive uploads the files automatically.

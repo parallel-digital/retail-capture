@@ -1,22 +1,21 @@
 """Capture full-page screenshots + element clips for a list of URLs.
 
-  python capture.py --setup        # open a visible browser once: set ZIP, solve CAPTCHA, log in
-  python capture.py                # capture everything in urls.csv
-  python capture.py --only amazon  # only rows whose retailer matches
+  python capture.py --setup           # open a visible browser once: set ZIP, solve CAPTCHA, log in
+  python capture.py                   # capture everything in urls.csv
+  python capture.py --only amazon     # only rows whose retailer matches
+  python capture.py --account "Account A"
+
+Output: <output_dir>/<account>/<YYYY-MM-DD>/<HHMM>/<retailer>/<name>/full.png + clips/
 """
-import argparse, asyncio, json, random, re, sys
+import argparse, asyncio, json, os, random
+from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-import pandas as pd
 import yaml
 from playwright.async_api import async_playwright
 
-from common import DATA as ROOT
-
-
-def slug(s):
-    return re.sub(r"[^a-zA-Z0-9]+", "-", str(s)).strip("-").lower()[:60] or "page"
+from common import DATA as ROOT, read_urls, slug
 
 
 async def autoscroll(page, pause):
@@ -43,9 +42,9 @@ async def dismiss(page, selectors):
             pass
 
 
-async def capture_one(ctx, row, cfg, out_dir):
+async def capture_one(ctx, row, cfg, run_dir):
     t = cfg["timing"]
-    folder = out_dir / slug(row["retailer"]) / slug(row["name"])
+    folder = run_dir / slug(row["retailer"]) / slug(row["name"])
     (folder / "clips").mkdir(parents=True, exist_ok=True)
     page = await ctx.new_page()
     result = {**row, "status": "ok", "clips": []}
@@ -54,7 +53,7 @@ async def capture_one(ctx, row, cfg, out_dir):
         await page.wait_for_timeout(t["settle_ms"])
         title = (await page.title()) or ""
         if "robot" in title.lower() or "captcha" in title.lower():
-            raise RuntimeError("CAPTCHA/bot check detected - run `python capture.py --setup`")
+            raise RuntimeError("CAPTCHA/bot check detected - run the one-time browser setup")
         await dismiss(page, cfg.get("dismiss_selectors", []))
         await autoscroll(page, t["scroll_pause_ms"])
         await page.screenshot(path=str(folder / "full.png"), full_page=True)
@@ -86,11 +85,12 @@ async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--setup", action="store_true")
     ap.add_argument("--only", help="filter by retailer")
+    ap.add_argument("--account", help="filter by account")
     ap.add_argument("--config", default=str(ROOT / "config.yaml"))
     ap.add_argument("--urls", default=str(ROOT / "urls.csv"))
     args = ap.parse_args()
 
-    cfg = yaml.safe_load(open(args.config))
+    cfg = yaml.safe_load(open(args.config, encoding="utf-8"))
     b = cfg["browser"]
     profile = str(ROOT / b["profile_dir"])
 
@@ -106,19 +106,25 @@ async def main():
             await ctx.close()
             return
 
-        df = pd.read_csv(args.urls).fillna("")
+        df = read_urls(args.urls)
         if args.only:
             df = df[df["retailer"].str.lower() == args.only.lower()]
+        if args.account:
+            df = df[df["account"].str.lower() == args.account.lower()]
+
+        base = Path(os.path.expandvars(os.path.expanduser(str(cfg["output_dir"]))))
+        if not base.is_absolute():
+            base = ROOT / base
         now = datetime.now()
-        out_dir = Path(cfg["output_dir"])
-        out_dir = (out_dir if out_dir.is_absolute() else ROOT / out_dir) / now.strftime("%Y-%m-%d") / now.strftime("%H%M")
-        out_dir.mkdir(parents=True, exist_ok=True)
+        day, hhmm = now.strftime("%Y-%m-%d"), now.strftime("%H%M")
 
         results = []
-        for n, row in enumerate(df.to_dict("records"), 1):
-            print(f"[{n}/{len(df)}] {row['retailer']} / {row['name']}", flush=True)
+        rows = df.to_dict("records")
+        for n, row in enumerate(rows, 1):
+            print(f"[{n}/{len(rows)}] {row['account']} / {row['retailer']} / {row['name']}", flush=True)
+            run_dir = base / slug(row["account"]) / day / hhmm
             for attempt in range(cfg["timing"].get("retries", 1) + 1):
-                r = await capture_one(ctx, row, cfg, out_dir)
+                r = await capture_one(ctx, row, cfg, run_dir)
                 if r["status"] == "ok":
                     break
             print(f"    -> {r['status']} ({len(r['clips'])} clips)", flush=True)
@@ -126,9 +132,15 @@ async def main():
             lo, hi = cfg["timing"]["between_urls_sec"]
             await asyncio.sleep(random.uniform(lo, hi))
 
-        (out_dir / "manifest.json").write_text(json.dumps(results, indent=2))
+        by_account = defaultdict(list)
+        for r in results:
+            by_account[r["account"]].append(r)
+        for acct, rs in by_account.items():
+            run_dir = base / slug(acct) / day / hhmm
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "manifest.json").write_text(json.dumps(rs, indent=2), encoding="utf-8")
         ok = sum(r["status"] == "ok" for r in results)
-        print(f"Done: {ok}/{len(results)} ok. Saved to {out_dir}")
+        print(f"Done: {ok}/{len(results)} ok. Saved under {base}", flush=True)
         await ctx.close()
 
 
