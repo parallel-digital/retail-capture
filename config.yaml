@@ -1,6 +1,9 @@
 # Where runs are saved. Point this at a synced OneDrive/SharePoint folder if you like.
 output_dir: output
 
+# Set true to save each page's HTML next to its screenshot (use to find the right selectors).
+debug_html: false
+
 browser:
   channel: msedge          # Edge ships with Windows, so the .exe needs nothing extra. "chrome" also works if installed
   profile_dir: browser_profile   # persistent profile: keeps ZIP code, cookies, logins
@@ -28,6 +31,9 @@ clips:
     - {name: top-items, selector: "#gridItemRoot", max: 5}
   search:
     - {name: top-results, selector: "[data-component-type='s-search-result']", max: 4}
+    # Sponsored product cards: any result card whose text contains "Sponsored"
+    - {name: sponsored-products, selector: "[data-component-type='s-search-result']", has_text: "Sponsored", max: 6}
+    # Sponsored brand banner: UNVERIFIED guess - confirm with debug_html (see notes)
     - {name: sponsored-brand, selector: "[data-component-type='s-sponsored-brand']", max: 2}
   deals:
     - {name: deal-tiles, selector: "[data-testid='deal-card'], [data-testid='DealCard']", max: 6}

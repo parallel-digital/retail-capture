@@ -13,7 +13,7 @@ Windows Task Scheduler: run `python capture.py` at the times you want during the
 Set `output_dir` in config.yaml to a synced OneDrive/SharePoint folder to share results.
 
 ## Output
-output/YYYY-MM-DD/HHMM/<retailer>/<name>/full.png, clips/*.png, plus manifest.json per run.
+output/<account>/<retailer>/YYYY-MM-DD/HHMM/<name>/full.png, clips/*.png, plus manifest.json per run.
 
 ## Tuning clips
 Selectors in config.yaml are starting points. Right-click the element in Chrome > Inspect,
@@ -34,6 +34,6 @@ Download `RetailCapture-Setup.exe` from the run's Artifacts. Installs per-user (
 
 ## Accounts, import, and saving to SharePoint
 - Import a CSV/Excel list in the Run tab. Columns: account, url, retailer, page_type, name (only url required).
-- Captures are saved as `<save folder>/<account>/<date>/<time>/<retailer>/<name>/`.
+- Captures are saved as `<save folder>/<account>/<retailer>/<date>/<time>/<name>/`.
 - To save to SharePoint: in the SharePoint library click Sync (or "Add shortcut to OneDrive"), then paste that
   local folder path into Settings > Save location. OneDrive uploads the files automatically.

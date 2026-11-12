@@ -5,7 +5,7 @@
   python capture.py --only amazon     # only rows whose retailer matches
   python capture.py --account "Account A"
 
-Output: <output_dir>/<account>/<YYYY-MM-DD>/<HHMM>/<retailer>/<name>/full.png + clips/
+Output: <output_dir>/<account>/<retailer>/<YYYY-MM-DD>/<HHMM>/<name>/full.png + clips/
 """
 import argparse, asyncio, json, os, random
 from collections import defaultdict
@@ -44,7 +44,7 @@ async def dismiss(page, selectors):
 
 async def capture_one(ctx, row, cfg, run_dir):
     t = cfg["timing"]
-    folder = run_dir / slug(row["retailer"]) / slug(row["name"])
+    folder = run_dir / slug(row["name"])
     (folder / "clips").mkdir(parents=True, exist_ok=True)
     page = await ctx.new_page()
     result = {**row, "status": "ok", "clips": []}
@@ -59,9 +59,16 @@ async def capture_one(ctx, row, cfg, run_dir):
         await page.screenshot(path=str(folder / "full.png"), full_page=True)
         result["title"] = title
 
+        if cfg.get("debug_html"):
+            (folder / "page.html").write_text(await page.content(), encoding="utf-8")
+        report = {}
         for rule in cfg.get("clips", {}).get(row["page_type"], []):
             loc = page.locator(rule["selector"])
-            count = min(await loc.count(), rule.get("max", 1))
+            if rule.get("has_text"):          # e.g. only cards that contain the word "Sponsored"
+                loc = loc.filter(has_text=rule["has_text"])
+            found = await loc.count()
+            count = min(found, rule.get("max", 1))
+            saved = 0
             for i in range(count):
                 el = loc.nth(i)
                 try:
@@ -72,8 +79,11 @@ async def capture_one(ctx, row, cfg, run_dir):
                     fn = f"{rule['name']}-{i + 1}.png"
                     await el.screenshot(path=str(folder / "clips" / fn))
                     result["clips"].append({"file": fn, "selector": rule["selector"], "index": i})
+                    saved += 1
                 except Exception:
                     continue
+            report[rule["name"]] = f"{found} found, {saved} clipped"
+        result["clip_report"] = report
     except Exception as e:
         result["status"] = f"error: {e}"
     finally:
@@ -98,7 +108,9 @@ async def main():
         ctx = await p.chromium.launch_persistent_context(
             profile, channel=b.get("channel", "chrome"),
             headless=False if args.setup else b["headless"],
-            viewport=b["viewport"], locale=b.get("locale", "en-US"))
+            viewport=b["viewport"], locale=b.get("locale", "en-US"),
+            args=["--disable-blink-features=AutomationControlled"],
+            ignore_default_args=["--enable-automation"])
         if args.setup:
             page = await ctx.new_page()
             await page.goto("https://www.amazon.com")
@@ -122,21 +134,23 @@ async def main():
         rows = df.to_dict("records")
         for n, row in enumerate(rows, 1):
             print(f"[{n}/{len(rows)}] {row['account']} / {row['retailer']} / {row['name']}", flush=True)
-            run_dir = base / slug(row["account"]) / day / hhmm
+            run_dir = base / slug(row["account"]) / slug(row["retailer"]) / day / hhmm
             for attempt in range(cfg["timing"].get("retries", 1) + 1):
                 r = await capture_one(ctx, row, cfg, run_dir)
                 if r["status"] == "ok":
                     break
             print(f"    -> {r['status']} ({len(r['clips'])} clips)", flush=True)
+            for k, v in r.get("clip_report", {}).items():
+                print(f"       {k}: {v}", flush=True)
             results.append(r)
             lo, hi = cfg["timing"]["between_urls_sec"]
             await asyncio.sleep(random.uniform(lo, hi))
 
-        by_account = defaultdict(list)
+        groups = defaultdict(list)
         for r in results:
-            by_account[r["account"]].append(r)
-        for acct, rs in by_account.items():
-            run_dir = base / slug(acct) / day / hhmm
+            groups[(r["account"], r["retailer"])].append(r)
+        for (acct, ret), rs in groups.items():
+            run_dir = base / slug(acct) / slug(ret) / day / hhmm
             run_dir.mkdir(parents=True, exist_ok=True)
             (run_dir / "manifest.json").write_text(json.dumps(rs, indent=2), encoding="utf-8")
         ok = sum(r["status"] == "ok" for r in results)

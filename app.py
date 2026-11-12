@@ -35,12 +35,12 @@ def runs():
     r = out_root()
     if not r.exists():
         return []
-    found = [p for p in r.glob("*/*/*") if p.is_dir() and any(p.glob("*/*/full.png"))]
+    found = [p for p in r.glob("*/*/*/*") if p.is_dir() and any(p.glob("*/full.png"))]
     return sorted(found, key=lambda p: (p.parent.name, p.name), reverse=True)
 
 
 def run_label(p):
-    return f"{p.parent.parent.name} | {p.parent.name} {p.name}"
+    return f"{p.parent.parent.parent.name} | {p.parent.parent.name} | {p.parent.name} {p.name}"
 
 
 def clean(df):
@@ -118,22 +118,28 @@ with tab_run:
         proc.wait()
         st.success("Finished - see Gallery")
 
-with tab_gal:
+def pick_run(prefix):
+    """Account > retailer > date/time pickers; returns the chosen run folder (or None)."""
     rs = runs()
     if not rs:
         st.info("No runs yet.")
-    else:
-        run = st.selectbox("Run", rs, format_func=run_label)
+        return None
+    c1, c2, c3 = st.columns(3)
+    acct = c1.selectbox("Account", sorted({p.parent.parent.parent.name for p in rs}), key=prefix + "a")
+    rets = sorted({p.parent.parent.name for p in rs if p.parent.parent.parent.name == acct})
+    ret = c2.selectbox("Retailer", rets, key=prefix + "r")
+    cands = [p for p in rs if p.parent.parent.parent.name == acct and p.parent.parent.name == ret]
+    return c3.selectbox("Date / time", cands, format_func=lambda p: f"{p.parent.name} {p.name}", key=prefix + "t")
+
+
+with tab_gal:
+    run = pick_run("g")
+    if run:
         if st.button("Open this folder"):
             open_folder(run)
-        pages = sorted(run.glob("*/*/full.png"))
-        retailers = sorted({p.parent.parent.name for p in pages})
-        pick = st.multiselect("Retailer", retailers, default=retailers)
         view = st.radio("Show", ["Clips", "Full pages"], horizontal=True)
-        for full in pages:
-            if full.parent.parent.name not in pick:
-                continue
-            st.markdown(f"**{full.parent.parent.name} / {full.parent.name}**")
+        for full in sorted(run.glob("*/full.png")):
+            st.markdown(f"**{full.parent.name}**")
             if view == "Full pages":
                 st.image(str(full))
             else:
@@ -145,13 +151,10 @@ with tab_gal:
                         col.image(str(cp), caption=cp.stem)
 
 with tab_crop:
-    rs = runs()
-    if not rs:
-        st.info("No runs yet.")
-    else:
-        run = st.selectbox("Run ", rs, format_func=run_label, key="cr")
-        fulls = sorted(run.glob("*/*/full.png"))
-        src = st.selectbox("Page", fulls, format_func=lambda p: f"{p.parent.parent.name} / {p.parent.name}")
+    run = pick_run("c")
+    if run:
+        fulls = sorted(run.glob("*/full.png"))
+        src = st.selectbox("Page", fulls, format_func=lambda p: p.parent.name)
         img = Image.open(src)
         st.caption(f"{img.width} x {img.height}px")
         crop = None
