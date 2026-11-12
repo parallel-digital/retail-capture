@@ -5,9 +5,13 @@ output_dir: output
 debug_html: false
 
 browser:
-  channel: msedge          # Edge ships with Windows, so the .exe needs nothing extra. "chrome" also works if installed
-  profile_dir: browser_profile   # persistent profile: keeps ZIP code, cookies, logins
-  headless: true
+  # cdp        = launch the real Edge/Chrome and drive it. Looks like a normal shopper, so Amazon serves ads.
+  # playwright = browser launched by automation (Amazon often withholds sponsored placements from it).
+  mode: cdp
+  channel: msedge          # Edge ships with Windows; "chrome" also works if installed
+  profile_dir: edge_profile   # persistent profile: keeps ZIP code and cookies (run the one-time setup after changing)
+  headless: false          # false = a browser window appears during capture (recommended for ads)
+  debug_port: 9222
   viewport: {width: 1440, height: 900}
   locale: en-US
 
@@ -31,10 +35,18 @@ clips:
     - {name: top-items, selector: "#gridItemRoot", max: 5}
   search:
     - {name: top-results, selector: "[data-component-type='s-search-result']", max: 4}
-    # Sponsored product cards: any result card whose text contains "Sponsored"
+    # Sponsored product cards (any result card containing "Sponsored")
     - {name: sponsored-products, selector: "[data-component-type='s-search-result']", has_text: "Sponsored", max: 6}
-    # Sponsored brand banner: UNVERIFIED guess - confirm with debug_html (see notes)
-    - {name: sponsored-brand, selector: "[data-component-type='s-sponsored-brand']", max: 2}
+    # Sponsored Brands: banner with product carousel (e.g. "Class D car audio amplifiers | Shop Brand")
+    - {name: sponsored-brand-banner, selector: ".s-widget-container:has(a[aria-label^='Sponsored ad from'])", max: 2}
+    # Sponsored Brands video (single and multi product)
+    - {name: sponsored-video, selector: ".s-widget-container:has([data-component-type^='sbv-video'])", max: 3}
+    # Sponsored carousels inside results ("Customers frequently viewed", "Seen on social media" ...)
+    - {name: sponsored-carousel, selector: ".s-widget-container:has([data-component-type='s-searchgrid-carousel'])", has_text: "Sponsored", max: 3}
+    # "Brands related to your search" footer
+    - {name: sponsored-brand-footer, selector: ".AdHolder:has([cel_widget_id*='brand-footer'])", max: 1}
+    # Display ads: left skyscrapers and bottom banner
+    - {name: sponsored-display, selector: ".AdHolder:has([cel_widget_id^='loom-desktop-skyscraper']), .AdHolder:has([cel_widget_id^='loom-desktop-footer-slot'])", max: 4}
   deals:
     - {name: deal-tiles, selector: "[data-testid='deal-card'], [data-testid='DealCard']", max: 6}
   brand_store:
