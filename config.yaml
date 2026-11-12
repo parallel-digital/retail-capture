@@ -1,0 +1,35 @@
+# Where runs are saved. Point this at a synced OneDrive/SharePoint folder if you like.
+output_dir: output
+
+browser:
+  channel: msedge          # Edge ships with Windows, so the .exe needs nothing extra. "chrome" also works if installed
+  profile_dir: browser_profile   # persistent profile: keeps ZIP code, cookies, logins
+  headless: true
+  viewport: {width: 1440, height: 900}
+  locale: en-US
+
+timing:
+  settle_ms: 2500          # wait after load
+  scroll_pause_ms: 450     # pause between scroll steps (triggers lazy loading)
+  between_urls_sec: [3, 8] # random delay range to look less robotic
+  retries: 1
+
+# Click these if present (cookie banners, location popups)
+dismiss_selectors:
+  - "#sp-cc-accept"
+  - "input[data-action-type='DISMISS']"
+  - "button:has-text('Accept')"
+  - "button[aria-label='Close']"
+
+# Auto-clips per page_type. Selectors WILL need tuning to your pages; use browser DevTools.
+# max = how many matching elements to clip (e.g. first 4 bestseller tiles).
+clips:
+  bestsellers:
+    - {name: top-items, selector: "#gridItemRoot", max: 5}
+  search:
+    - {name: top-results, selector: "[data-component-type='s-search-result']", max: 4}
+    - {name: sponsored-brand, selector: "[data-component-type='s-sponsored-brand']", max: 2}
+  deals:
+    - {name: deal-tiles, selector: "[data-testid='deal-card'], [data-testid='DealCard']", max: 6}
+  brand_store:
+    - {name: hero, selector: "[class*='hero'], [id*='hero']", max: 1}
