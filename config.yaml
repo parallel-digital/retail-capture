@@ -18,8 +18,14 @@ browser:
 timing:
   settle_ms: 2500          # wait after load
   scroll_pause_ms: 450     # pause between scroll steps (triggers lazy loading)
-  between_urls_sec: [3, 8] # random delay range to look less robotic
+  between_urls_sec: [20, 45] # random pause between URLs. Slower = far fewer Amazon human checks
   retries: 1
+
+# What to do when Amazon shows an "I am human" check
+blocks:
+  wait_for_human_sec: 180   # visible browser: wait this long for you to tick the box, then continue
+  cooldown_sec: 120         # pause after a block before the next URL
+  retry_blocked: true       # retry blocked URLs once at the end of the run
 
 # Click these if present (cookie banners, location popups)
 dismiss_selectors:
