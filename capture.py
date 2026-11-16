@@ -108,12 +108,18 @@ async def capture_one(ctx, row, cfg, run_dir):
             if rule.get("has_text"):          # e.g. only cards that contain the word "Sponsored"
                 loc = loc.filter(has_text=rule["has_text"])
             found = await loc.count()
+            if found == 0 and rule.get("fallback_selector"):      # try the backup selector
+                loc = page.locator(rule["fallback_selector"])
+                if rule.get("fallback_has_text"):
+                    loc = loc.filter(has_text=rule["fallback_has_text"])
+                found = await loc.count()
             count = min(found, rule.get("max", 1))
             saved = 0
             for i in range(count):
                 el = loc.nth(i)
                 try:
                     await el.scroll_into_view_if_needed(timeout=3000)
+                    await page.wait_for_timeout(int(rule.get("wait_ms", 0)))   # let lazy images finish
                     box = await el.bounding_box()
                     if not box or box["width"] < 40 or box["height"] < 40:
                         continue

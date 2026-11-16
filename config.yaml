@@ -55,5 +55,9 @@ clips:
     - {name: sponsored-display, selector: ".AdHolder:has([cel_widget_id^='loom-desktop-skyscraper']), .AdHolder:has([cel_widget_id^='loom-desktop-footer-slot'])", max: 4}
   deals:
     - {name: deal-tiles, selector: "[data-testid='deal-card'], [data-testid='DealCard']", max: 6}
+  pdp_brand_story:
+    # Amazon product page (/dp/ASIN): the "From the brand" module.
+    # Selectors are best guesses - confirm on a real page (see debug_html). Fallback matches by the heading text.
+    - {name: from-the-brand, selector: "#aplusBrandStory_feature_div", fallback_selector: "div[id$='_feature_div']", fallback_has_text: "From the brand", wait_ms: 1500, max: 1}
   brand_store:
     - {name: hero, selector: "[class*='hero'], [id*='hero']", max: 1}
