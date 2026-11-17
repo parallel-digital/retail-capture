@@ -37,3 +37,19 @@ Download `RetailCapture-Setup.exe` from the run's Artifacts. Installs per-user (
 - Captures are saved as `<save folder>/<account>/<retailer>/<date>/<time>/<name>/`.
 - To save to SharePoint: in the SharePoint library click Sync (or "Add shortcut to OneDrive"), then paste that
   local folder path into Settings > Save location. OneDrive uploads the files automatically.
+
+## Why a visible browser (mode: cdp)
+Amazon withholds sponsored placements from automation-launched and headless browsers. In `mode: cdp` the app
+starts your real Edge with its own profile and drives it, so a browser window appears while it captures. Run the
+one-time setup after switching, browse Amazon normally for a minute, then capture. Scheduled runs need a logged-in
+Windows session (screen can be locked only if the PC isn't set to sleep).
+
+## Manifests for downstream automation (RIP, Copilot/Rook, Power Automate)
+- Every run's `manifest.json` is still the same JSON array. Each page record keeps all its original fields and
+  gains: `schema_version, event, capture_date, capture_time, run_id, manifest_url, page_id, page_folder,
+  page_folder_url, full_page{file,file_url}`; each clip gains `file_url` and `rel_path`.
+- `<save folder>/event-manifest.json` indexes every run for the event (upserted by `run_id`, history kept).
+- `event` = config `event`, else the save folder name. SharePoint links come from the OneDrive sync client's own
+  folder mapping; set `sharepoint.local_root` / `sharepoint.url_base` in config.yaml only if links are missing.
+- Runs made before this feature: `RetailCapture.exe --capture --backfill` (or `python capture.py --backfill`).
+- Tests: `python tests/test_manifests.py`

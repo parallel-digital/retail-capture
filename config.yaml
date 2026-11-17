@@ -1,6 +1,16 @@
 # Where runs are saved. Point this at a synced OneDrive/SharePoint folder if you like.
 output_dir: output
 
+# Event name written into manifests. Blank = the name of the save folder above (e.g. "T12 2026").
+event: ""
+
+# Used to turn saved files into SharePoint links (file_url). Blank = auto-detected from the OneDrive sync client.
+# Only set these if links are missing: local_root = the synced folder on this PC, url_base = its SharePoint URL.
+sharepoint:
+  local_root: ""
+  url_base: ""
+
+
 # Set true to save each page's HTML next to its screenshot (use to find the right selectors).
 debug_html: false
 

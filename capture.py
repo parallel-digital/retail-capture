@@ -16,6 +16,7 @@ import yaml
 from playwright.async_api import async_playwright
 
 from common import DATA as ROOT, read_urls, slug
+import manifest
 
 
 async def autoscroll(page, pause):
@@ -265,11 +266,17 @@ async def main():
     ap.add_argument("--setup", action="store_true")
     ap.add_argument("--only", help="filter by retailer")
     ap.add_argument("--account", help="filter by account")
+    ap.add_argument("--event", help="event name for manifests (default: config `event`, else the save folder's name)")
+    ap.add_argument("--backfill", action="store_true",
+                    help="add the new manifest fields to existing runs and build event-manifest.json, then exit")
     ap.add_argument("--config", default=str(ROOT / "config.yaml"))
     ap.add_argument("--urls", default=str(ROOT / "urls.csv"))
     args = ap.parse_args()
 
     cfg = yaml.safe_load(open(args.config, encoding="utf-8"))
+    if args.backfill:
+        manifest.backfill(cfg, manifest.output_base(cfg, ROOT), event=args.event)
+        return
 
     async with async_playwright() as p:
         ctx, cleanup = await open_browser(p, cfg, args.setup)
@@ -334,13 +341,8 @@ async def main():
                 results[idx] = r
                 await asyncio.sleep(cool if r["status"] == "blocked" else random.uniform(lo, hi))
 
-        groups = defaultdict(list)
-        for r in results:
-            groups[(r["account"], r["retailer"])].append(r)
-        for (acct, ret), rs in groups.items():
-            run_dir = base / slug(acct) / slug(ret) / day / hhmm
-            run_dir.mkdir(parents=True, exist_ok=True)
-            (run_dir / "manifest.json").write_text(json.dumps(rs, indent=2), encoding="utf-8")
+        # Writes each run's manifest.json (existing fields + additive metadata) and updates event-manifest.json.
+        manifest.publish(cfg, base, results, now, event=args.event)
         ok = sum(r["status"] == "ok" for r in results)
         nb = sum(r["status"] == "blocked" for r in results)
         print(f"Done: {ok}/{len(results)} ok" + (f", {nb} blocked by Amazon" if nb else "") + f". Saved under {base}", flush=True)
