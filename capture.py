@@ -42,6 +42,25 @@ async def dismiss(page, selectors):
             pass
 
 
+# Finds a module by its visible heading text (e.g. "From the brand") and returns the module's container.
+FIND_HEADING_JS = """(text) => {
+  const want = text.trim().toLowerCase();
+  const vis = e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+  const sels = ['[id$="_feature_div"]', '[data-feature-name]', '.celwidget', '[cel_widget_id]'];
+  const cands = [...document.querySelectorAll('h1,h2,h3,h4,h5,span,div')].filter(e =>
+      e.children.length <= 2 && (e.textContent || '').trim().toLowerCase() === want && vis(e));
+  for (const e of cands) {
+    for (const s of sels) { const c = e.closest(s); if (c && vis(c)) return c; }
+  }
+  return null;
+}"""
+
+
+async def find_by_heading(page, heading):
+    h = await page.evaluate_handle(FIND_HEADING_JS, heading)
+    return h.as_element()
+
+
 class Blocked(Exception):
     pass
 
@@ -103,7 +122,32 @@ async def capture_one(ctx, row, cfg, run_dir):
         if cfg.get("debug_html"):
             (folder / "page.html").write_text(await page.content(), encoding="utf-8")
         report = {}
-        for rule in cfg.get("clips", {}).get(row["page_type"], []):
+        rules = cfg.get("clips", {}).get(row["page_type"], [])
+        if not rules:
+            report["(none)"] = f"no clip rules for page_type '{row['page_type']}' in config.yaml - full page only"
+        for rule in rules:
+            if rule.get("heading"):     # locate the module by its heading text, clip its container
+                el = await find_by_heading(page, rule["heading"])
+                if el or not rule.get("selector"):
+                    saved = 0
+                    if el:
+                        try:
+                            await el.scroll_into_view_if_needed(timeout=3000)
+                            await page.wait_for_timeout(int(rule.get("wait_ms", 0)))
+                            box = await el.bounding_box()
+                            if box and box["width"] >= 40 and box["height"] >= 40:
+                                fn = f"{rule['name']}-1.png"
+                                await el.screenshot(path=str(folder / "clips" / fn))
+                                result["clips"].append({"file": fn, "heading": rule["heading"], "index": 0})
+                                saved = 1
+                        except Exception:
+                            pass
+                    missed = not el and rule.get("save_html_on_miss")
+                    if missed:
+                        (folder / "page.html").write_text(await page.content(), encoding="utf-8")
+                    report[rule["name"]] = (f"{1 if el else 0} found, {saved} clipped"
+                                            + (" - saved page.html next to full.png, send it for a selector fix" if missed else ""))
+                    continue
             loc = page.locator(rule["selector"])
             if rule.get("has_text"):          # e.g. only cards that contain the word "Sponsored"
                 loc = loc.filter(has_text=rule["has_text"])
@@ -115,6 +159,9 @@ async def capture_one(ctx, row, cfg, run_dir):
                 found = await loc.count()
             count = min(found, rule.get("max", 1))
             saved = 0
+            missed = found == 0 and rule.get("save_html_on_miss")
+            if missed:      # keep the page source so the selector can be fixed
+                (folder / "page.html").write_text(await page.content(), encoding="utf-8")
             for i in range(count):
                 el = loc.nth(i)
                 try:
@@ -129,7 +176,8 @@ async def capture_one(ctx, row, cfg, run_dir):
                     saved += 1
                 except Exception:
                     continue
-            report[rule["name"]] = f"{found} found, {saved} clipped"
+            report[rule["name"]] = (f"{found} found, {saved} clipped"
+                                    + (" - saved page.html next to full.png, send it for a selector fix" if missed else ""))
         result["clip_report"] = report
     except Blocked:
         result["status"] = "blocked"

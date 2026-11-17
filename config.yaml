@@ -56,8 +56,8 @@ clips:
   deals:
     - {name: deal-tiles, selector: "[data-testid='deal-card'], [data-testid='DealCard']", max: 6}
   pdp_brand_story:
-    # Amazon product page (/dp/ASIN): the "From the brand" module.
-    # Selectors are best guesses - confirm on a real page (see debug_html). Fallback matches by the heading text.
-    - {name: from-the-brand, selector: "#aplusBrandStory_feature_div", fallback_selector: "div[id$='_feature_div']", fallback_has_text: "From the brand", wait_ms: 1500, max: 1}
+    # Amazon product page (/dp/ASIN). Each module is found by its visible heading, then its whole section is clipped.
+    - {name: from-the-brand, heading: "From the brand", wait_ms: 1500, save_html_on_miss: true}
+    - {name: from-the-manufacturer, heading: "From the manufacturer", wait_ms: 2000, save_html_on_miss: true}
   brand_store:
     - {name: hero, selector: "[class*='hero'], [id*='hero']", max: 1}
