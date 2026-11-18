@@ -177,29 +177,73 @@ with tab_crop:
             st.success(f"Saved {dest.name}")
 
 with tab_cfg:
+    cfg = load_cfg()
+    current_dir = str(cfg["output_dir"])
+    inferred_event = Path(os.path.expandvars(os.path.expanduser(current_dir))).name
+
+    st.subheader("Event setup")
+    st.caption("Set event details here. The app saves these values to config.yaml automatically.")
+
+    phase_options = {
+        "Not specified": "",
+        "Baseline": "baseline",
+        "Pre-event": "pre_event",
+        "Live event": "live_event",
+        "Post-event": "post_event",
+    }
+    saved_phase = str(cfg.get("event_phase") or "")
+    saved_phase_label = next((label for label, value in phase_options.items() if value == saved_phase), "Not specified")
+
+    event_name = st.text_input(
+        "Event name",
+        value=str(cfg.get("event") or inferred_event),
+        help="Defaults to the final save-folder name, such as T12 2026.",
+    )
+    event_phase_label = st.selectbox(
+        "Event phase",
+        options=list(phase_options.keys()),
+        index=list(phase_options.keys()).index(saved_phase_label),
+        help="Written into each manifest for comparisons across event phases.",
+    )
+
     st.subheader("Save location")
-    st.caption("Any folder works, including a SharePoint/OneDrive folder synced to this PC. "
-               "Files upload automatically while OneDrive is running.")
-    raw = CFG.read_text(encoding="utf-8")
-    new_dir = st.text_input("Save captures to", str(load_cfg()["output_dir"]))
-    if st.button("Save location"):
+    st.caption("Any folder works, including a SharePoint/OneDrive folder synced to this PC. Files upload automatically while OneDrive is running.")
+    new_dir = st.text_input("Save captures to", current_dir)
+
+    sharepoint_cfg = cfg.get("sharepoint", {}) or {}
+    sharepoint_url = st.text_input(
+        "SharePoint event folder URL (optional)",
+        value=str(sharepoint_cfg.get("url_base") or ""),
+        help="Paste the SharePoint URL matching the save folder so manifests can contain direct image links.",
+    )
+
+    if st.button("Save event settings", type="primary"):
         try:
             Path(os.path.expandvars(os.path.expanduser(new_dir))).mkdir(parents=True, exist_ok=True)
-            safe = new_dir.replace("'", "''")
-            raw = re.sub(r"^output_dir:.*$", lambda _: f"output_dir: '{safe}'", raw, flags=re.M)
-            CFG.write_text(raw, encoding="utf-8")
-            saved = True
-        except Exception as e:
-            saved = False
-            st.error(f"Can't use that folder: {e}")
-        if saved:
+            updated = load_cfg()
+            updated["output_dir"] = new_dir
+            updated["event"] = event_name.strip()
+            updated["event_phase"] = phase_options[event_phase_label]
+            if not isinstance(updated.get("sharepoint"), dict):
+                updated["sharepoint"] = {}
+            updated["sharepoint"]["url_base"] = sharepoint_url.strip()
+            CFG.write_text(yaml.safe_dump(updated, sort_keys=False, allow_unicode=True), encoding="utf-8")
+            st.success("Event settings saved")
             st.rerun()
+        except Exception as e:
+            st.error(f"Couldn't save event settings: {e}")
+
     if st.button("Open save folder"):
         open_folder(out_root())
 
-    st.subheader("config.yaml")
-    txt = st.text_area("Edit selectors, timing and browser settings", raw, height=450)
-    if st.button("Save config"):
-        yaml.safe_load(txt)   # validate before writing
-        CFG.write_text(txt, encoding="utf-8")
-        st.success("Saved")
+    with st.expander("Advanced settings - config.yaml"):
+        st.caption("Selectors, timing, browser settings and other technical options.")
+        raw = CFG.read_text(encoding="utf-8")
+        txt = st.text_area("Edit advanced YAML", raw, height=450)
+        if st.button("Save advanced config"):
+            try:
+                yaml.safe_load(txt)
+                CFG.write_text(txt, encoding="utf-8")
+                st.success("Advanced config saved")
+            except Exception as e:
+                st.error(f"Invalid config: {e}")
