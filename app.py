@@ -177,73 +177,29 @@ with tab_crop:
             st.success(f"Saved {dest.name}")
 
 with tab_cfg:
-    st.subheader("Event setup")
-    st.caption("Set the event metadata here. These fields update config.yaml automatically, so normal event setup does not require editing YAML.")
-
-    cfg = load_cfg()
-    raw = CFG.read_text(encoding="utf-8")
-    current_dir = str(cfg["output_dir"])
-    inferred_event = Path(os.path.expandvars(os.path.expanduser(current_dir))).name
-
-    phase_labels = {
-        "Not specified": "",
-        "Baseline": "baseline",
-        "Pre-event": "pre_event",
-        "Live event": "live_event",
-        "Post-event": "post_event",
-    }
-    reverse_phase = {v: k for k, v in phase_labels.items()}
-    current_phase_label = reverse_phase.get(str(cfg.get("event_phase") or ""), "Not specified")
-
-    event_name = st.text_input(
-        "Event name",
-        value=str(cfg.get("event") or inferred_event),
-        help="Defaults to the final folder name, such as T12 2026. This value is written into the manifests.",
-    )
-    event_phase_label = st.selectbox(
-        "Event phase",
-        list(phase_labels.keys()),
-        index=list(phase_labels.keys()).index(current_phase_label),
-        help="Used to group captures into baseline, pre-event, live-event and post-event comparisons.",
-    )
-
     st.subheader("Save location")
-    st.caption("Any folder works, including a SharePoint/OneDrive folder synced to this PC. Files upload automatically while OneDrive is running.")
-    new_dir = st.text_input("Save captures to", current_dir)
-
-    sp_cfg = cfg.get("sharepoint", {}) or {}
-    sp_url = st.text_input(
-        "SharePoint event URL (optional)",
-        value=str(sp_cfg.get("url_base") or ""),
-        help="Paste the SharePoint folder URL that corresponds to the Save captures to folder. Leave blank to use auto-detection.",
-    )
-
-    if st.button("Save event settings", type="primary"):
+    st.caption("Any folder works, including a SharePoint/OneDrive folder synced to this PC. "
+               "Files upload automatically while OneDrive is running.")
+    raw = CFG.read_text(encoding="utf-8")
+    new_dir = st.text_input("Save captures to", str(load_cfg()["output_dir"]))
+    if st.button("Save location"):
         try:
             Path(os.path.expandvars(os.path.expanduser(new_dir))).mkdir(parents=True, exist_ok=True)
-            updated = load_cfg()
-            updated["output_dir"] = new_dir
-            updated["event"] = event_name.strip()
-            updated["event_phase"] = phase_labels[event_phase_label]
-            updated.setdefault("sharepoint", {})
-            updated["sharepoint"]["url_base"] = sp_url.strip()
-            CFG.write_text(yaml.safe_dump(updated, sort_keys=False, allow_unicode=True), encoding="utf-8")
-            st.success("Event settings saved")
-            st.rerun()
+            safe = new_dir.replace("'", "''")
+            raw = re.sub(r"^output_dir:.*$", lambda _: f"output_dir: '{safe}'", raw, flags=re.M)
+            CFG.write_text(raw, encoding="utf-8")
+            saved = True
         except Exception as e:
-            st.error(f"Couldn't save event settings: {e}")
-
+            saved = False
+            st.error(f"Can't use that folder: {e}")
+        if saved:
+            st.rerun()
     if st.button("Open save folder"):
         open_folder(out_root())
 
-    with st.expander("Advanced settings - config.yaml"):
-        st.caption("Selectors, browser behavior, timing and other technical settings. Most event runs should not need this section.")
-        raw = CFG.read_text(encoding="utf-8")
-        txt = st.text_area("Edit advanced YAML", raw, height=450)
-        if st.button("Save advanced config"):
-            try:
-                yaml.safe_load(txt)
-                CFG.write_text(txt, encoding="utf-8")
-                st.success("Advanced config saved")
-            except Exception as e:
-                st.error(f"Invalid config: {e}")
+    st.subheader("config.yaml")
+    txt = st.text_area("Edit selectors, timing and browser settings", raw, height=450)
+    if st.button("Save config"):
+        yaml.safe_load(txt)   # validate before writing
+        CFG.write_text(txt, encoding="utf-8")
+        st.success("Saved")
