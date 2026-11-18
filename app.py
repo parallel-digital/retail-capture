@@ -210,6 +210,12 @@ with tab_cfg:
     st.caption("Any folder works, including a SharePoint/OneDrive folder synced to this PC. Files upload automatically while OneDrive is running.")
     new_dir = st.text_input("Save captures to", current_dir)
 
+    st.subheader("Data collection")
+    collection_cfg = cfg.get("collection", {}) or {}
+    collect_html = st.checkbox("Save page HTML", value=bool(collection_cfg.get("save_html", True)), help="Saves page.html beside each screenshot as the raw source artifact.")
+    collect_structured = st.checkbox("Extract structured page data", value=bool(collection_cfg.get("extract_structured_data", True)), help="Creates page-data.json with Amazon search, Best Seller, and PDP fields.")
+    st.caption("Recommended: keep both enabled. Screenshots preserve shopper experience; structured data powers comparisons and datasets.")
+
     sharepoint_cfg = cfg.get("sharepoint", {}) or {}
     sharepoint_url = st.text_input(
         "SharePoint event folder URL (optional)",
@@ -224,6 +230,7 @@ with tab_cfg:
             updated["output_dir"] = new_dir
             updated["event"] = event_name.strip()
             updated["event_phase"] = phase_options[event_phase_label]
+            updated["collection"] = {"save_html": collect_html, "extract_structured_data": collect_structured}
             if not isinstance(updated.get("sharepoint"), dict):
                 updated["sharepoint"] = {}
             updated["sharepoint"]["url_base"] = sharepoint_url.strip()

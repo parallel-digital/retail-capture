@@ -17,6 +17,7 @@ from playwright.async_api import async_playwright
 
 from common import DATA as ROOT, read_urls, slug
 import manifest
+from page_data import extract_page_data, write_page_data
 
 
 async def autoscroll(page, pause):
@@ -121,8 +122,21 @@ async def capture_one(ctx, row, cfg, run_dir):
         await page.screenshot(path=str(folder / "full.png"), full_page=True)
         result["title"] = title
 
-        if cfg.get("debug_html"):
-            (folder / "page.html").write_text(await page.content(), encoding="utf-8")
+        collection = cfg.get("collection", {}) or {}
+        if collection.get("save_html", True):
+            html_path = folder / "page.html"
+            html_path.write_text(await page.content(), encoding="utf-8")
+            result["html_file"] = html_path.name
+        if collection.get("extract_structured_data", True):
+            try:
+                structured = await extract_page_data(page, row, result["captured_at"])
+                data_path = write_page_data(folder, structured)
+                result["page_data_file"] = data_path.name
+                result["data_extraction_status"] = structured.get("extraction_status", "ok")
+                result["data_record_count"] = structured.get("result_count", structured.get("item_count", 1 if structured.get("product") else 0))
+            except Exception as exc:
+                result["data_extraction_status"] = "failed"
+                result["data_extraction_error"] = str(exc)
         report = {}
         rules = cfg.get("clips", {}).get(row["page_type"], [])
         if not rules:

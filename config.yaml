@@ -13,7 +13,11 @@ sharepoint:
   url_base: ""
 
 
-# Set true to save each page's HTML next to its screenshot (use to find the right selectors).
+# Save visual evidence, raw HTML, and analysis-ready JSON.
+collection:
+  save_html: true
+  extract_structured_data: true
+# Legacy setting retained for backward compatibility.
 debug_html: false
 
 browser:

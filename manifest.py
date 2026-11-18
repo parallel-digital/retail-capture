@@ -119,6 +119,10 @@ def _page_record(cfg, base, run_dir, result, captured_at):
             "file_size_bytes": cs,
         })
 
+    html_path = page_folder / result.get("html_file", "page.html")
+    data_path = page_folder / result.get("page_data_file", "page-data.json")
+    html_relative = html_path.relative_to(base).as_posix() if html_path.exists() else None
+    data_relative = data_path.relative_to(base).as_posix() if data_path.exists() else None
     raw_status = result.get("status", "error: unknown capture state")
     return {
         "page_key": page_key,
@@ -141,6 +145,15 @@ def _page_record(cfg, base, run_dir, result, captured_at):
         "image_width": width,
         "image_height": height,
         "file_size_bytes": size,
+        "html_file_name": html_path.name if html_relative else None,
+        "html_relative_path": html_relative,
+        "html_sharepoint_url": _sharepoint_url(cfg, html_relative) if html_relative else None,
+        "page_data_file_name": data_path.name if data_relative else None,
+        "page_data_relative_path": data_relative,
+        "page_data_sharepoint_url": _sharepoint_url(cfg, data_relative) if data_relative else None,
+        "data_extraction_status": result.get("data_extraction_status"),
+        "data_record_count": result.get("data_record_count"),
+        "data_extraction_error": result.get("data_extraction_error"),
         "clips": clips,
         "clip_report": result.get("clip_report", {}),
         "error": None if ok else raw_status,
