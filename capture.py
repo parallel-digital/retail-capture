@@ -17,7 +17,7 @@ from playwright.async_api import async_playwright
 
 from common import DATA as ROOT, read_urls, slug
 import manifest
-from page_data import extract_page_data, write_page_data
+import runtime_control as runtime
 
 
 async def autoscroll(page, pause):
@@ -122,21 +122,8 @@ async def capture_one(ctx, row, cfg, run_dir):
         await page.screenshot(path=str(folder / "full.png"), full_page=True)
         result["title"] = title
 
-        collection = cfg.get("collection", {}) or {}
-        if collection.get("save_html", True):
-            html_path = folder / "page.html"
-            html_path.write_text(await page.content(), encoding="utf-8")
-            result["html_file"] = html_path.name
-        if collection.get("extract_structured_data", True):
-            try:
-                structured = await extract_page_data(page, row, result["captured_at"])
-                data_path = write_page_data(folder, structured)
-                result["page_data_file"] = data_path.name
-                result["data_extraction_status"] = structured.get("extraction_status", "ok")
-                result["data_record_count"] = structured.get("result_count", structured.get("item_count", 1 if structured.get("product") else 0))
-            except Exception as exc:
-                result["data_extraction_status"] = "failed"
-                result["data_extraction_error"] = str(exc)
+        if cfg.get("debug_html"):
+            (folder / "page.html").write_text(await page.content(), encoding="utf-8")
         report = {}
         rules = cfg.get("clips", {}).get(row["page_type"], [])
         if not rules:
@@ -288,6 +275,13 @@ async def main():
     ap.add_argument("--urls", default=str(ROOT / "urls.csv"))
     args = ap.parse_args()
 
+    if not args.setup and not args.backfill:
+        if not runtime.acquire_lock():
+            runtime.update_state(status="skipped_busy", message="Another capture is already running")
+            print("Another capture is already running; exiting.", flush=True)
+            return
+        atexit.register(runtime.release_lock)
+
     cfg = yaml.safe_load(open(args.config, encoding="utf-8"))
     if args.backfill:
         manifest.backfill(cfg, manifest.output_base(cfg, ROOT), event=args.event)
@@ -328,40 +322,81 @@ async def main():
             for k, v in r.get("clip_report", {}).items():
                 print(f"       {k}: {v}", flush=True)
 
-        results, blocked = [], []
+        results = []
         rows = df.to_dict("records")
-        for n, row in enumerate(rows, 1):
-            print(f"[{n}/{len(rows)}] {row['account']} / {row['retailer']} / {row['name']}", flush=True)
-            for attempt in range(cfg["timing"].get("retries", 1) + 1):
-                r = await capture_one(ctx, row, cfg, run_dir_for(row))
-                if r["status"] in ("ok", "blocked"):      # never hammer a page that blocked us
-                    break
-            report(r)
-            results.append(r)
-            if r["status"] == "blocked":
-                blocked.append(len(results) - 1)
-                print(f"    !! Blocked. Cooling down {cool}s before the next URL.", flush=True)
-                await asyncio.sleep(cool)
-            else:
+        runtime.update_state(
+            status="running", run_id=f"{day}_{hhmm}", event=args.event or cfg.get("event") or base.name,
+            event_phase=cfg.get("event_phase"), started_at=now.isoformat(timespec="seconds"),
+            total=len(rows), completed=0, ok=0, failed=0, blocked=0,
+            current_account=None, current_page=None, next_index=1,
+            message="Capture started", output_dir=str(base), pid=os.getpid()
+        )
+        stopped = False
+        try:
+            for n, row in enumerate(rows, 1):
+                if not await runtime.wait_for_control():
+                    stopped = True; break
+                runtime.update_state(status="running", current_index=n, next_index=n,
+                                     current_account=row.get("account"), current_retailer=row.get("retailer"),
+                                     current_page=row.get("name"), current_url=row.get("url"),
+                                     message=f"Capturing {row.get('name')}")
+                print(f"[{n}/{len(rows)}] {row['account']} / {row['retailer']} / {row['name']}", flush=True)
+                for attempt in range(cfg["timing"].get("retries", 1) + 1):
+                    r = await capture_one(ctx, row, cfg, run_dir_for(row))
+                    if r["status"] in ("ok", "blocked"):
+                        break
+                report(r); results.append(r)
+                ok_count=sum(x["status"]=="ok" for x in results)
+                failed_count=sum(x["status"] not in ("ok","blocked") for x in results)
+                blocked_count=sum(x["status"]=="blocked" for x in results)
+                runtime.update_state(completed=len(results), ok=ok_count, failed=failed_count,
+                                     blocked=blocked_count, next_index=n+1, last_completed_page=row.get("name"),
+                                     last_completed_account=row.get("account"))
+                # Explicit human-in-the-loop recovery. Browser/profile remain open.
+                if r["status"] == "blocked":
+                    challenge_path=str(run_dir_for(row) / slug(row.get("name","page")) / "blocked.png")
+                    runtime.update_state(status="needs_attention", challenge_url=row.get("url"),
+                                         challenge_screenshot=challenge_path,
+                                         message="Amazon verification detected. Complete it in the open browser, then Resume.")
+                    runtime.notify_attention(
+                        message=f"Amazon verification detected while capturing {row.get('account')} / {row.get('name')}. The run is paused. Complete verification in the capture browser, then click Resume in Retail Capture."
+                    )
+                    print("    !! Amazon verification detected. Capture paused for human review.", flush=True)
+                    if not await runtime.wait_for_control(default_status="running"):
+                        stopped=True; break
+                    # Retry the blocked page once after the operator resumes.
+                    runtime.update_state(status="running", message=f"Retrying {row.get('name')} after verification")
+                    retry = await capture_one(ctx, row, cfg, run_dir_for(row))
+                    report(retry); results[-1]=retry
+                    runtime.update_state(ok=sum(x["status"]=="ok" for x in results),
+                                         failed=sum(x["status"] not in ("ok","blocked") for x in results),
+                                         blocked=sum(x["status"]=="blocked" for x in results))
+                    if retry["status"] == "blocked":
+                        runtime.update_state(status="needs_attention", message="Verification is still present. Complete it and Resume again.")
+                        runtime.notify_attention(title="Retail Capture still needs attention", message="Amazon verification is still present after the retry. The capture remains paused. Complete verification, then Resume again.")
+                        if not await runtime.wait_for_control(default_status="running"):
+                            stopped=True; break
+                if stopped: break
                 await asyncio.sleep(random.uniform(lo, hi))
 
-        if blocked and blk.get("retry_blocked", True):
-            print(f"Retrying {len(blocked)} blocked URL(s) once after a pause...", flush=True)
-            await asyncio.sleep(cool)
-            for idx in blocked:
-                row = rows[idx]
-                print(f"[retry] {row['account']} / {row['retailer']} / {row['name']}", flush=True)
-                r = await capture_one(ctx, row, cfg, run_dir_for(row))
-                report(r)
-                results[idx] = r
-                await asyncio.sleep(cool if r["status"] == "blocked" else random.uniform(lo, hi))
-
-        # Writes each run's manifest.json (existing fields + additive metadata) and updates event-manifest.json.
-        manifest.publish(cfg, base, results, now, event=args.event)
-        ok = sum(r["status"] == "ok" for r in results)
-        nb = sum(r["status"] == "blocked" for r in results)
-        print(f"Done: {ok}/{len(results)} ok" + (f", {nb} blocked by Amazon" if nb else "") + f". Saved under {base}", flush=True)
-        await cleanup()
+            if results:
+                manifest.publish(cfg, base, results, now, event=args.event)
+            final_status = "stopped" if stopped else ("partial" if any(r["status"] != "ok" for r in results) else "complete")
+            runtime.update_state(status=final_status, completed=len(results),
+                                 ok=sum(r["status"]=="ok" for r in results),
+                                 failed=sum(r["status"] not in ("ok","blocked") for r in results),
+                                 blocked=sum(r["status"]=="blocked" for r in results),
+                                 current_account=None, current_page=None, current_url=None,
+                                 completed_at=datetime.now().astimezone().isoformat(timespec="seconds"),
+                                 message="Capture stopped safely" if stopped else "Capture finished")
+            print(f"Done: {sum(r['status']=='ok' for r in results)}/{len(results)} ok. Saved under {base}", flush=True)
+        except Exception as exc:
+            runtime.update_state(status="failed", message=str(exc), error=repr(exc),
+                                 completed_at=datetime.now().astimezone().isoformat(timespec="seconds"))
+            raise
+        finally:
+            await cleanup()
+            runtime.release_lock()
 
 
 if __name__ == "__main__":

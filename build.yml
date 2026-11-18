@@ -19,6 +19,7 @@ jobs:
           grep -q 'from page_data import' capture.py
           test -f manifest.py
           test -f page_data.py
+          test -f runtime_control.py
           python -m unittest test_page_data.py
       - name: Package with PyInstaller
         shell: bash
@@ -27,7 +28,7 @@ jobs:
             --collect-all streamlit --collect-all playwright --collect-all streamlit_cropper \
             --copy-metadata streamlit \
             --hidden-import PIL --hidden-import pandas --hidden-import yaml --hidden-import openpyxl \
-            --hidden-import common --hidden-import capture --hidden-import manifest --hidden-import page_data \
+            --hidden-import common --hidden-import capture --hidden-import manifest --hidden-import page_data --hidden-import runtime_control \
             --add-data "app.py;." --add-data "config.yaml;." --add-data "urls.csv;." \
             launcher.py
       - run: choco install innosetup -y

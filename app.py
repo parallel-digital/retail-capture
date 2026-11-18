@@ -13,6 +13,7 @@ except Exception:
     st_cropper = None
 
 from common import COLS, DATA as ROOT, FROZEN, normalize_urls, read_urls
+import runtime_control as runtime
 
 HERE = Path(__file__).parent
 URLS = ROOT / "urls.csv"
@@ -54,9 +55,48 @@ def open_folder(p):
         st.info(str(p))
 
 
+
+def render_live_status():
+    state = runtime.read_state()
+    status = state.get("status", "idle")
+    active = status in {"running", "paused", "needs_attention", "stopping"}
+    st.subheader("Live capture status")
+    labels = {"running":"RUNNING", "paused":"PAUSED", "needs_attention":"AMAZON NEEDS ATTENTION",
+              "stopping":"STOPPING", "complete":"COMPLETE", "partial":"PARTIAL", "failed":"FAILED",
+              "stopped":"STOPPED", "skipped_busy":"SKIPPED - ALREADY RUNNING", "idle":"IDLE"}
+    st.markdown(f"### {labels.get(status, status.upper())}")
+    total=int(state.get("total") or 0); completed=int(state.get("completed") or 0)
+    if total:
+        st.progress(min(completed / total, 1.0), text=f"{completed} of {total} pages complete")
+    c1,c2,c3,c4=st.columns(4)
+    c1.metric("Completed", completed); c2.metric("Successful", int(state.get("ok") or 0))
+    c3.metric("Failed", int(state.get("failed") or 0)); c4.metric("Blocked", int(state.get("blocked") or 0))
+    if state.get("current_account"): st.write(f"**Current:** {state.get('current_account')} | {state.get('current_page')}")
+    if state.get("message"): st.info(state["message"])
+    if status == "needs_attention":
+        st.warning("Complete Amazon's verification in the browser window opened by the capture worker. Do not close that browser. Then click Resume.")
+        st.caption("A Windows desktop alert also appears when verification is detected, even if this browser tab is hidden or closed.")
+        if state.get("challenge_screenshot") and Path(state["challenge_screenshot"]).exists():
+            st.caption(f"Challenge evidence saved: {state['challenge_screenshot']}")
+    b1,b2,b3,b4=st.columns(4)
+    if b1.button("Pause after current page", disabled=status != "running"):
+        runtime.send_command("pause"); st.rerun()
+    if b2.button("Resume capture", type="primary", disabled=status not in {"paused","needs_attention"}):
+        runtime.send_command("resume"); st.rerun()
+    if b3.button("Stop safely", disabled=not active):
+        runtime.send_command("stop"); st.rerun()
+    if b4.button("Refresh status"):
+        st.rerun()
+    st.caption(f"Last updated: {state.get('updated_at') or 'No run yet'}")
+
 tab_run, tab_gal, tab_crop, tab_cfg = st.tabs(["Run", "Gallery", "Manual crop", "Settings"])
 
 with tab_run:
+    if hasattr(st, "fragment"):
+        st.fragment(run_every="2s")(render_live_status)()
+    else:
+        render_live_status()
+    st.divider()
     if "urls" not in st.session_state:
         st.session_state.urls = read_urls(URLS) if URLS.exists() else pd.DataFrame(columns=COLS)
         st.session_state.ver = 0
@@ -108,15 +148,14 @@ with tab_run:
         base = ([sys.executable, "--capture"] if FROZEN
                 else [sys.executable, "-u", str(HERE / "capture.py")])
         cmd = base + (["--account", acct] if acct != "all" else []) + (["--only", ret] if ret != "all" else [])
-        box, log = st.empty(), ""
         env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
-        proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                text=True, encoding="utf-8", errors="replace")
-        for line in proc.stdout:
-            log += line
-            box.code(log[-3000:])
-        proc.wait()
-        st.success("Finished - see Gallery")
+        log_path = runtime.RUNTIME / "capture.log"
+        runtime.RUNTIME.mkdir(parents=True, exist_ok=True)
+        log_handle = open(log_path, "a", encoding="utf-8")
+        subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=log_handle, stderr=subprocess.STDOUT,
+                         creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+        st.success("Capture started. Progress appears above; the browser tab can be closed without stopping the worker.")
+        st.rerun()
 
 def pick_run(prefix):
     """Account > retailer > date/time pickers; returns the chosen run folder (or None)."""
@@ -210,12 +249,6 @@ with tab_cfg:
     st.caption("Any folder works, including a SharePoint/OneDrive folder synced to this PC. Files upload automatically while OneDrive is running.")
     new_dir = st.text_input("Save captures to", current_dir)
 
-    st.subheader("Data collection")
-    collection_cfg = cfg.get("collection", {}) or {}
-    collect_html = st.checkbox("Save page HTML", value=bool(collection_cfg.get("save_html", True)), help="Saves page.html beside each screenshot as the raw source artifact.")
-    collect_structured = st.checkbox("Extract structured page data", value=bool(collection_cfg.get("extract_structured_data", True)), help="Creates page-data.json with Amazon search, Best Seller, and PDP fields.")
-    st.caption("Recommended: keep both enabled. Screenshots preserve shopper experience; structured data powers comparisons and datasets.")
-
     sharepoint_cfg = cfg.get("sharepoint", {}) or {}
     sharepoint_url = st.text_input(
         "SharePoint event folder URL (optional)",
@@ -230,7 +263,6 @@ with tab_cfg:
             updated["output_dir"] = new_dir
             updated["event"] = event_name.strip()
             updated["event_phase"] = phase_options[event_phase_label]
-            updated["collection"] = {"save_html": collect_html, "extract_structured_data": collect_structured}
             if not isinstance(updated.get("sharepoint"), dict):
                 updated["sharepoint"] = {}
             updated["sharepoint"]["url_base"] = sharepoint_url.strip()
