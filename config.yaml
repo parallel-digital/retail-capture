@@ -3,6 +3,8 @@ output_dir: output
 
 # Event name written into manifests. Blank = the name of the save folder above (e.g. "T12 2026").
 event: ""
+# Optional capture phase: baseline, pre_event, live_event, post_event. Blank = null.
+event_phase: ""
 
 # Used to turn saved files into SharePoint links (file_url). Blank = auto-detected from the OneDrive sync client.
 # Only set these if links are missing: local_root = the synced folder on this PC, url_base = its SharePoint URL.

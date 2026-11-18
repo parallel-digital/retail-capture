@@ -108,12 +108,13 @@ async def capture_one(ctx, row, cfg, run_dir):
     folder = run_dir / slug(row["name"])
     (folder / "clips").mkdir(parents=True, exist_ok=True)
     page = await ctx.new_page()
-    result = {**row, "status": "ok", "clips": []}
+    result = {**row, "status": "ok", "clips": [], "captured_at": datetime.now().astimezone().isoformat(timespec="seconds")}
     try:
         await page.goto(row["url"], wait_until="domcontentloaded", timeout=60000)
         await page.wait_for_timeout(t["settle_ms"])
         await ensure_clear(page, row, cfg, folder)
         title = (await page.title()) or ""
+        result["final_url"] = page.url
         await dismiss(page, cfg.get("dismiss_selectors", []))
         await autoscroll(page, t["scroll_pause_ms"])
         await ensure_clear(page, row, cfg, folder)      # a check can also appear mid-page
@@ -298,7 +299,7 @@ async def main():
         base = Path(os.path.expandvars(os.path.expanduser(str(cfg["output_dir"]))))
         if not base.is_absolute():
             base = ROOT / base
-        now = datetime.now()
+        now = datetime.now().astimezone()
         day, hhmm = now.strftime("%Y-%m-%d"), now.strftime("%H%M")
 
         blk = cfg.get("blocks", {})
