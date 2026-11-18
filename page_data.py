@@ -27,6 +27,122 @@ def _money(value):
     return float(match.group(1).replace(",", "")) if match else None
 
 
+def _compact_token(value):
+    return re.sub(r"[^a-z0-9]+", "-", str(value or "").lower()).strip("-")
+
+
+def _page_key(row):
+    account = _compact_token(row.get("account"))
+    retailer = _compact_token(row.get("retailer"))
+    page_type = _compact_token(row.get("page_type") or "other")
+    source = row.get("search_term") or row.get("name") or row.get("url") or "page"
+    if row.get("url"):
+        from urllib.parse import parse_qs, urlparse, unquote_plus
+        values = parse_qs(urlparse(row["url"]).query).get("k")
+        if values:
+            source = unquote_plus(values[0])
+    return f"{account}|{retailer}|{page_type}|{_compact_token(source)}"
+
+
+def _brand_from_title(title):
+    """Conservative brand normalization for Amazon titles.
+
+    Amazon search cards do not consistently expose a brand field. Keep this
+    dictionary intentionally small and explicit; unknown brands remain null.
+    """
+    if not title:
+        return None
+    known = {
+        "cobra": "Cobra", "uniden": "Uniden", "retevis": "Retevis",
+        "radioddity": "Radioddity", "luiton": "LUITON", "abbree": "ABBREE",
+        "midland": "Midland", "motorola": "Motorola", "escort": "ESCORT",
+        "whistler": "Whistler", "baofeng": "BAOFENG", "carrborg": "CARRBORG",
+    }
+    normalized = re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
+    first = normalized.split(" ", 1)[0] if normalized else ""
+    return known.get(first)
+
+
+def _rating_from_text(value):
+    if not value:
+        return None
+    match = re.search(r"\b([0-5](?:\.\d)?)\s*(?:out\s+of\s+5\s+stars|stars?)\b", str(value), re.I)
+    if not match:
+        # Amazon often renders "4.5 4.5 out of 5 stars".
+        match = re.search(r"\b([0-5](?:\.\d)?)\s+[0-5](?:\.\d)?\s+out\s+of\s+5\s+stars", str(value), re.I)
+    return float(match.group(1)) if match else None
+
+
+def _review_count(value):
+    if not value:
+        return None
+    text = str(value)
+    # Prefer the parenthesized review count beside the star rating.
+    match = re.search(r"\(([0-9]+(?:\.[0-9]+)?)([KkMm]?)\)", text)
+    if not match:
+        return None
+    number = float(match.group(1))
+    multiplier = {"": 1, "k": 1000, "m": 1000000}[match.group(2).lower()]
+    return int(round(number * multiplier))
+
+
+def _bought_past_month(value):
+    if not value:
+        return None
+    match = re.search(r"([0-9]+(?:\.[0-9]+)?)([KkMm]?)\+?\s+bought\s+in\s+past\s+month", str(value), re.I)
+    if not match:
+        return None
+    number = float(match.group(1))
+    multiplier = {"": 1, "k": 1000, "m": 1000000}[match.group(2).lower()]
+    return int(round(number * multiplier))
+
+
+def _list_price(value, visible_text=None):
+    # Only accept explicit list-price evidence. Never treat unit/count pricing as list price.
+    amount = _money(value)
+    if amount is not None:
+        return amount
+    if visible_text:
+        match = re.search(r"\bList:\s*\$\s*([0-9][0-9,]*(?:\.\d{1,2})?)", visible_text, re.I)
+        if match:
+            return float(match.group(1).replace(",", ""))
+    return None
+
+
+BADGE_PATTERNS = [
+    (re.compile(r"\bAmazon'?s Choice\b", re.I), "Amazon's Choice"),
+    (re.compile(r"\bBest Seller\b", re.I), "Best Seller"),
+    (re.compile(r"\bOverall Pick\b", re.I), "Overall Pick"),
+    (re.compile(r"\bLowest price in 30 days\b", re.I), "Lowest price in 30 days"),
+    (re.compile(r"\bLimited time deal\b", re.I), "Limited time deal"),
+    (re.compile(r"\bBlack Friday Deal\b", re.I), "Black Friday Deal"),
+    (re.compile(r"\bCyber Monday Deal\b", re.I), "Cyber Monday Deal"),
+]
+
+
+def _clean_badges(item):
+    evidence = " ".join([str(item.get("visible_text") or "")] + [str(x) for x in item.get("badges", [])])
+    return [label for pattern, label in BADGE_PATTERNS if pattern.search(evidence)]
+
+
+def _enrich_result(item, row, page_key):
+    visible = item.get("visible_text") or ""
+    item["brand"] = _brand_from_title(item.get("title"))
+    item["rating"] = _number(item.get("rating")) if item.get("rating") is not None else None
+    if item["rating"] is None:
+        item["rating"] = _rating_from_text(visible)
+    if item.get("review_count") is None:
+        item["review_count"] = _review_count(visible)
+    item["bought_past_month"] = _bought_past_month(visible)
+    item["list_price"] = _list_price(item.get("list_price"), visible)
+    price, list_price = item.get("price"), item.get("list_price")
+    item["discount_pct"] = round((list_price - price) / list_price * 100, 1) if price is not None and list_price and list_price > price else None
+    item["badges"] = _clean_badges(item)
+    asin = item.get("asin")
+    item["result_key"] = f"{page_key}|{asin.lower()}" if asin else f"{page_key}|position-{item.get('position') or item.get('rank')}"
+    return item
+
+
 SEARCH_JS = r"""() => {
   const clean = value => (value || '').replace(/\s+/g, ' ').trim() || null;
   const attr = (node, selector, name) => {
@@ -139,34 +255,44 @@ async def extract_page_data(page, row, captured_at):
         "final_url": page.url,
         "page_title": await page.title(),
         "extraction_status": "ok",
+        "page_key": _page_key(row),
     }
     if page_type == "search":
         rows = await page.evaluate(SEARCH_JS)
         for item in rows:
             item["price"] = _money(item.pop("price_text", None))
-            item["list_price"] = _money(item.pop("list_price_text", None))
-            item["rating"] = _number(item.pop("rating_text", None))
+            item["list_price"] = _list_price(item.pop("list_price_text", None), item.get("visible_text"))
+            rating_text = item.pop("rating_text", None)
+            item["rating"] = _rating_from_text(rating_text)
             reviews = item.pop("review_count_text", None)
-            item["review_count"] = int(_number(reviews)) if _number(reviews) is not None else None
-        payload["search_term"] = row.get("search_term")
+            item["review_count"] = _review_count(reviews)
+            _enrich_result(item, row, payload["page_key"])
+        from urllib.parse import parse_qs, urlparse, unquote_plus
+        query_term = parse_qs(urlparse(row.get("url", "")).query).get("k", [None])[0]
+        payload["search_term"] = unquote_plus(query_term) if query_term else row.get("search_term")
         payload["result_count"] = len(rows)
         payload["results"] = rows
     elif page_type == "bestsellers":
         rows = await page.evaluate(BESTSELLER_JS)
         for item in rows:
             item["price"] = _money(item.pop("price_text", None))
-            item["rating"] = _number(item.pop("rating_text", None))
+            rating_text = item.pop("rating_text", None)
+            item["rating"] = _rating_from_text(rating_text)
             reviews = item.pop("review_count_text", None)
-            item["review_count"] = int(_number(reviews)) if _number(reviews) is not None else None
+            item["review_count"] = _review_count(reviews)
+            _enrich_result(item, row, payload["page_key"])
         payload["item_count"] = len(rows)
         payload["items"] = rows
     elif page_type.startswith("pdp"):
         item = await page.evaluate(PDP_JS)
         item["price"] = _money(item.pop("price_text", None))
-        item["list_price"] = _money(item.pop("list_price_text", None))
-        item["rating"] = _number(item.pop("rating_text", None))
+        item["list_price"] = _list_price(item.pop("list_price_text", None))
+        rating_text = item.pop("rating_text", None)
+        item["rating"] = _rating_from_text(rating_text)
         reviews = item.pop("review_count_text", None)
-        item["review_count"] = int(_number(reviews)) if _number(reviews) is not None else None
+        item["review_count"] = _review_count(reviews)
+        item["brand"] = _brand_from_title(item.get("title")) or (re.sub(r"^(?:Visit the )?", "", item.get("brand") or "", flags=re.I).replace(" Store", "").strip() or None)
+        item["result_key"] = f"{payload['page_key']}|{str(item.get('asin') or 'product').lower()}"
         payload["product"] = item
     else:
         payload["extraction_status"] = "not_supported"
