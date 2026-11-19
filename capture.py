@@ -37,22 +37,39 @@ async def autoscroll(page, pause):
 
 
 async def prepare_deal_page(page, pause):
-    """Load the first deal batch without walking Amazon's virtual infinite list."""
+    """Hydrate Amazon's deal grid until product ASINs stabilize and loading clears."""
     await page.evaluate("window.scrollTo(0, 0)")
+    grid = page.locator("[data-testid='discount-asin-grid']").first
     try:
-        await page.locator("[data-testid='discount-asin-grid']").wait_for(state="attached", timeout=15000)
+        await grid.wait_for(state="attached", timeout=15000)
     except Exception:
         pass
-    # A short controlled scroll hydrates the first ten cards. Generic autoscroll
-    # advances the virtual list hundreds of products and creates a huge blank image.
-    for y in (700, 1400, 2100):
-        await page.evaluate(f"window.scrollTo(0, {y})")
-        await page.wait_for_timeout(pause)
-        if await page.locator("[data-testid='product-card']").count() >= 10:
+
+    stable_passes = 0
+    previous_asins = 0
+    max_passes = 30
+    for _ in range(max_passes):
+        # Advance roughly one viewport at a time. This hydrates Amazon's virtual list
+        # without one large jump that can leave a blank spacer in the screenshot.
+        await page.mouse.wheel(0, 700)
+        await page.wait_for_timeout(max(int(pause), 1200))
+        asin_count = await page.evaluate("""() => new Set(
+            [...document.querySelectorAll('a[href*="/dp/"], [data-asin]')]
+              .map(e => e.getAttribute('data-asin') || ((e.href || '').match(/\/dp\/([A-Z0-9]{10})/i) || [])[1])
+              .filter(Boolean)
+        ).size""")
+        spinner_visible = await page.evaluate("""() => [...document.querySelectorAll('[role="progressbar"], .a-spinner-wrapper, [class*="spinner"], [class*="loading"]')]
+            .some(e => { const r=e.getBoundingClientRect(); const s=getComputedStyle(e); return r.width>0 && r.height>0 && s.visibility!=='hidden' && s.display!=='none'; })""")
+        if asin_count == previous_asins and asin_count >= 10:
+            stable_passes += 1
+        else:
+            stable_passes = 0
+        previous_asins = asin_count
+        if stable_passes >= 3 and not spinner_visible:
             break
+
     await page.evaluate("window.scrollTo(0, 0)")
     await page.wait_for_timeout(1000)
-
 
 async def screenshot_page(page, path, page_type):
     if page_type != "deal_page":

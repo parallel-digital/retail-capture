@@ -109,6 +109,31 @@ def _list_price(value, visible_text=None):
     return None
 
 
+def _deal_rating_from_text(value):
+    rating = _rating_from_text(value)
+    if rating is not None:
+        return rating
+    if not value:
+        return None
+    # Deal cards often expose only "4.7 (5.5K)" in visible text.
+    match = re.search(r"\b([0-5](?:\.\d)?)\s*\([0-9]+(?:\.[0-9]+)?[KkMm]?\)", str(value))
+    return float(match.group(1)) if match else None
+
+def _deal_brand(item):
+    visible = item.get("visible_text") or ""
+    match = re.search(r"\bShop\s+(.+?)\s+deals\b", visible, re.I)
+    if match:
+        brand = re.sub(r"\s+", " ", match.group(1)).strip()
+        return brand if len(brand) <= 60 else None
+    return _brand_from_title(item.get("title"))
+
+def _normalize_deal_status(value):
+    if not value:
+        return None
+    text = re.sub(r"^\s*\d{1,3}%\s*off\s*", "", str(value), flags=re.I).strip()
+    m = re.search(r"(Ends in\s+\d{1,2}:\d{2}:\d{2}|Starts in\s+[^|]+|Sold out|Deal claimed|Available)", text, re.I)
+    return m.group(1) if m else (text or None)
+
 BADGE_PATTERNS = [
     (re.compile(r"\bAmazon'?s Choice\b", re.I), "Amazon's Choice"),
     (re.compile(r"\bBest Seller\b", re.I), "Best Seller"),
@@ -127,7 +152,7 @@ def _clean_badges(item):
 
 def _enrich_result(item, row, page_key):
     visible = item.get("visible_text") or ""
-    item["brand"] = _brand_from_title(item.get("title"))
+    item["brand"] = item.get("brand") or _brand_from_title(item.get("title"))
     item["rating"] = _number(item.get("rating")) if item.get("rating") is not None else None
     if item["rating"] is None:
         item["rating"] = _rating_from_text(visible)
