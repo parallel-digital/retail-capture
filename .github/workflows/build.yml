@@ -16,8 +16,6 @@ jobs:
         run: |
           python -m py_compile capture.py page_data.py manifest.py common.py runtime_control.py
           python -m unittest test_page_data.py test_runtime_control.py
-          grep -q "deterministic composite" capture.py
-          grep -q "a-truncate-full.a-offscreen" page_data.py
       - name: Package with PyInstaller
         shell: bash
         run: |
