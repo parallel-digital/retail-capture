@@ -71,57 +71,168 @@ async def prepare_deal_page(page, pause):
     await page.evaluate("window.scrollTo(0, 0)")
     await page.wait_for_timeout(1000)
 
+DEAL_GRID_TARGET = 20        # deals we want visible in full.png (grid only, carousel excluded)
+DEAL_MAX_SLICES = 8          # hard cap on viewport captures
+DEAL_MAX_HEIGHT_CSS = 7000   # hard cap on stitched image height (CSS px)
+
+# Returns layout facts in DOCUMENT coordinates for the current scroll position.
+DEAL_LAYOUT_JS = """() => {
+  const vis = (el) => {
+    const r = el.getBoundingClientRect();
+    const s = getComputedStyle(el);
+    return r.width > 40 && r.height > 40 && s.display !== 'none' && s.visibility !== 'hidden';
+  };
+  const anchor = document.querySelector(
+    "#dealsGridLinkAnchor, [data-testid='discount-asin-grid'], [data-testid='virtuoso-item-list']");
+  const gridTop = anchor ? anchor.getBoundingClientRect().top + window.scrollY : null;
+
+  const cards = [...document.querySelectorAll(
+    "[data-testid='product-card'], .dcl-product, [data-testid='discount-asin-grid'] [data-asin]")]
+    .filter(vis)
+    .map(el => {
+      const r = el.getBoundingClientRect();
+      const link = el.querySelector("a[href*='/dp/']");
+      const m = link ? (link.href.match(/\\/dp\\/([A-Z0-9]{10})/i) || []) : [];
+      return {
+        key: el.getAttribute('data-asin') || m[1] || (Math.round(r.left) + ':' + Math.round(r.top + scrollY)),
+        top: r.top + window.scrollY,
+        bottom: r.bottom + window.scrollY,
+      };
+    });
+  return {
+    gridTop,
+    cards,
+    scrollY: window.scrollY,
+    innerW: window.innerWidth,
+    innerH: window.innerHeight,
+    docH: document.documentElement.scrollHeight,
+    dpr: window.devicePixelRatio || 1,
+  };
+}"""
+
+# Hide fixed/sticky elements after the first slice so headers/timers don't repeat in the stitch.
+HIDE_STICKY_JS = """() => {
+  window.__rcHidden = window.__rcHidden || [];
+  for (const el of document.querySelectorAll('body *')) {
+    const p = getComputedStyle(el).position;
+    if ((p === 'fixed' || p === 'sticky') && el.style.visibility !== 'hidden') {
+      window.__rcHidden.push([el, el.style.visibility]);
+      el.style.visibility = 'hidden';
+    }
+  }
+}"""
+
+RESTORE_STICKY_JS = """() => {
+  for (const [el, v] of (window.__rcHidden || [])) el.style.visibility = v;
+  window.__rcHidden = [];
+}"""
+
+WAIT_IMAGES_JS = """() => [...document.images].filter(i => {
+  const r = i.getBoundingClientRect();
+  return r.bottom > 0 && r.top < innerHeight && r.width > 20;
+}).every(i => i.complete && i.naturalWidth > 0)"""
+
+
+async def _wait_for_viewport_images(page, timeout_ms=3000):
+    waited = 0
+    while waited < timeout_ms:
+        try:
+            if await page.evaluate(WAIT_IMAGES_JS):
+                return
+        except Exception:
+            return
+        await page.wait_for_timeout(250)
+        waited += 250
+
+
 async def screenshot_page(page, path, page_type):
+    """Write full.png. Returns a small diagnostics dict for the run log."""
     if page_type != "deal_page":
         await page.screenshot(path=str(path), full_page=True)
-        return
+        return {"method": "full_page"}
 
-    # Amazon deal pages use a virtualized grid whose DOM container can be much
-    # taller than the content actually painted. Do NOT screenshot the grid
-    # element itself. Instead, find the bottom of the currently rendered deal
-    # cards and capture only the meaningful document region above that point.
+    # Amazon virtualizes the deal grid: the document is very tall but only rows
+    # near the viewport are painted. full_page=True gives a blank tail, and a
+    # clip taller than the viewport is invalid without full_page. So we take
+    # real viewport screenshots top-down and stitch them, stopping once
+    # DEAL_GRID_TARGET grid cards have been fully captured.
     try:
         await page.evaluate("window.scrollTo(0, 0)")
-        await page.wait_for_timeout(700)
-        viewport = page.viewport_size or {"width": 1440, "height": 900}
+        await page.wait_for_timeout(800)
+        layout = await page.evaluate(DEAL_LAYOUT_JS)
+        inner_h = int(layout["innerH"])
+        dpr = float(layout["dpr"])
+        overlap = 60
+        step = max(300, inner_h - overlap)
 
-        bounds = await page.evaluate("""() => {
-          const visible = (el) => {
-            const r = el.getBoundingClientRect();
-            const s = getComputedStyle(el);
-            return r.width > 20 && r.height > 20 && s.display !== 'none' &&
-                   s.visibility !== 'hidden' && Number(s.opacity || 1) !== 0;
-          };
-          const nodes = [...document.querySelectorAll(
-            '[data-testid="discount-asin-grid"] [data-asin], ' +
-            '[data-testid="discount-asin-grid"] a[href*="/dp/"], ' +
-            'a[href*="/dp/"]'
-          )].filter(visible);
-          const rects = nodes.map(el => el.getBoundingClientRect())
-            .filter(r => r.top >= 0 && r.bottom > 0 && r.bottom < 5000);
-          if (!rects.length) return null;
-          return {
-            bottom: Math.ceil(Math.max(...rects.map(r => r.bottom + window.scrollY)))
-          };
-        }""")
+        slices = []            # (doc_y, PIL image)
+        seen_grid = {}         # key -> bottom (doc px)
+        target_bottom = None
+        y = 0
+        for i in range(DEAL_MAX_SLICES):
+            await page.evaluate("v => window.scrollTo(0, v)", y)
+            await page.wait_for_timeout(1200)
+            await _wait_for_viewport_images(page)
+            if i == 1:
+                await page.evaluate(HIDE_STICKY_JS)
+                await page.wait_for_timeout(150)
 
-        if not bounds or not bounds.get("bottom"):
-            raise RuntimeError("no rendered deal-card bounds found")
+            layout = await page.evaluate(DEAL_LAYOUT_JS)
+            actual_y = int(layout["scrollY"])
+            png = await page.screenshot(full_page=False)
+            slices.append((actual_y, Image.open(io.BytesIO(png)).convert("RGB")))
 
-        # Include a small footer margin, but never Amazon's enormous virtualized
-        # spacer. 2200 px comfortably covers the hero, filters, and several deal
-        # rows at the app's standard viewport size.
-        meaningful_height = min(max(int(bounds["bottom"]) + 40, viewport["height"]), 2200)
-        await page.screenshot(
-            path=str(path),
-            clip={"x": 0, "y": 0, "width": viewport["width"], "height": meaningful_height},
-        )
-    except Exception:
-        # Last-resort evidence: viewport-only is preferable to a 4,000+ px blank
-        # full-page image on a virtualized Amazon page.
+            grid_top = layout["gridTop"]
+            for c in layout["cards"]:
+                # Exclude the featured carousel: keep cards at/below the grid anchor.
+                if grid_top is not None and c["top"] < grid_top - 5:
+                    continue
+                seen_grid[c["key"]] = max(seen_grid.get(c["key"], 0), c["bottom"])
+
+            view_bottom = actual_y + inner_h
+            fully_seen = sorted(b for b in seen_grid.values() if b <= view_bottom)
+            if len(fully_seen) >= DEAL_GRID_TARGET:
+                target_bottom = fully_seen[DEAL_GRID_TARGET - 1]
+                break
+            at_end = view_bottom >= int(layout["docH"]) - 5
+            if at_end or view_bottom >= DEAL_MAX_HEIGHT_CSS:
+                break
+            y = actual_y + step
+
+        await page.evaluate(RESTORE_STICKY_JS)
+
+        last_y, last_img = slices[-1]
+        stitched_bottom = last_y + last_img.height / dpr
+        if target_bottom is None:
+            # Fewer than the target loaded: stop at the last fully captured grid card.
+            captured = [b for b in seen_grid.values() if b <= stitched_bottom]
+            target_bottom = max(captured) if captured else stitched_bottom
+        final_h_css = min(int(target_bottom) + 30, int(stitched_bottom), DEAL_MAX_HEIGHT_CSS)
+
+        width = max(im.width for _, im in slices)
+        canvas = Image.new("RGB", (width, int(final_h_css * dpr)), "white")
+        for doc_y, im in slices:   # later slices overwrite the overlap, which is fine
+            canvas.paste(im, (0, int(doc_y * dpr)))
+        canvas.save(path, format="PNG")
+
+        await page.evaluate("window.scrollTo(0, 0)")
+        await page.wait_for_timeout(300)
+        return {
+            "method": "stitched",
+            "slices": len(slices),
+            "grid_cards_captured": len([b for b in seen_grid.values() if b <= final_h_css]),
+            "height_css": final_h_css,
+        }
+    except Exception as exc:
+        try:
+            await page.evaluate(RESTORE_STICKY_JS)
+        except Exception:
+            pass
+        print(f"    !! deal_page stitch failed, viewport fallback: {exc}", flush=True)
         await page.evaluate("window.scrollTo(0, 0)")
         await page.wait_for_timeout(300)
         await page.screenshot(path=str(path), full_page=False)
+        return {"method": "viewport_fallback", "error": str(exc)}
 
 
 async def dismiss(page, selectors):
