@@ -35,6 +35,37 @@ async def autoscroll(page, pause):
     await page.wait_for_timeout(500)
 
 
+async def prepare_deal_page(page, pause):
+    """Load the first deal batch without walking Amazon's virtual infinite list."""
+    await page.evaluate("window.scrollTo(0, 0)")
+    try:
+        await page.locator("[data-testid='discount-asin-grid']").wait_for(state="attached", timeout=15000)
+    except Exception:
+        pass
+    # A short controlled scroll hydrates the first ten cards. Generic autoscroll
+    # advances the virtual list hundreds of products and creates a huge blank image.
+    for y in (700, 1400, 2100):
+        await page.evaluate(f"window.scrollTo(0, {y})")
+        await page.wait_for_timeout(pause)
+        if await page.locator("[data-testid='product-card']").count() >= 10:
+            break
+    await page.evaluate("window.scrollTo(0, 0)")
+    await page.wait_for_timeout(1000)
+
+
+async def screenshot_page(page, path, page_type):
+    if page_type != "deal_page":
+        await page.screenshot(path=str(path), full_page=True)
+        return
+    # Amazon deal pages use a virtual/infinite grid with a large spacer. Capture
+    # the useful first section rather than the synthetic document height.
+    metrics = await page.evaluate("""() => ({
+      width: Math.max(document.documentElement.clientWidth, window.innerWidth),
+      height: Math.min(Math.max(document.documentElement.clientHeight, 4200), 5200)
+    })""")
+    await page.screenshot(path=str(path), clip={"x": 0, "y": 0, "width": metrics["width"], "height": metrics["height"]})
+
+
 async def dismiss(page, selectors):
     for sel in selectors:
         try:
@@ -118,9 +149,12 @@ async def capture_one(ctx, row, cfg, run_dir):
         title = (await page.title()) or ""
         result["final_url"] = page.url
         await dismiss(page, cfg.get("dismiss_selectors", []))
-        await autoscroll(page, t["scroll_pause_ms"])
+        if row["page_type"] == "deal_page":
+            await prepare_deal_page(page, t["scroll_pause_ms"])
+        else:
+            await autoscroll(page, t["scroll_pause_ms"])
         await ensure_clear(page, row, cfg, folder)      # a check can also appear mid-page
-        await page.screenshot(path=str(folder / "full.png"), full_page=True)
+        await screenshot_page(page, folder / "full.png", row["page_type"])
         result["title"] = title
 
         # Save the rendered DOM as a durable source artifact. Keep debug_html as
@@ -161,6 +195,14 @@ async def capture_one(ctx, row, cfg, run_dir):
 
         report = {}
         rules = cfg.get("clips", {}).get(row["page_type"], [])
+        if row["page_type"] == "deal_page" and not rules:
+            rules = [{
+                "name": "top-deals",
+                "selector": "[data-testid='product-card'], .dcl-product[data-csa-c-item-id], .dcl-product",
+                "max": 10,
+                "wait_ms": 500,
+                "save_html_on_miss": True,
+            }]
         if not rules:
             report["(none)"] = f"no clip rules for page_type '{row['page_type']}' in config.yaml - full page only"
         for rule in rules:

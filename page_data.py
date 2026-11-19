@@ -227,12 +227,13 @@ DEAL_PAGE_JS = r"""() => {
     return el ? el.getAttribute(name) : null;
   };
   const selectors = [
+    "[data-testid='product-card']",
+    ".dcl-product[data-csa-c-item-id]",
+    ".dcl-product",
     "[data-testid='deal-card']",
     "[data-testid='DealCard']",
     "[data-testid*='deal-card']",
-    "[data-component-type='deal-card']",
-    ".DealCard-module__card",
-    ".a-section[id*='deal']"
+    "[data-component-type='deal-card']"
   ];
   const seen = new Set();
   const cards = [];
@@ -245,7 +246,9 @@ DEAL_PAGE_JS = r"""() => {
   for (const card of cards) {
     const link = card.querySelector("a[href*='/dp/'], a[href*='/gp/product/']");
     const href = link ? link.href : null;
+    const itemId = card.getAttribute('data-csa-c-item-id') || '';
     const asin = card.getAttribute('data-asin') ||
+      ((itemId.match(/amzn1\.asin\.([A-Z0-9]{10})/i) || [])[1] || null) ||
       (((href || '').match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i) || [])[1] || null);
     const title = text(card, "[data-testid*='title'], [class*='title'], h2, h3, a[title]") ||
       attr(card, 'a[title]', 'title') || attr(card, 'img[alt]', 'alt');

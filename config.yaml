@@ -71,8 +71,7 @@ clips:
     - {name: sponsored-display, selector: ".AdHolder:has([cel_widget_id^='loom-desktop-skyscraper']), .AdHolder:has([cel_widget_id^='loom-desktop-footer-slot'])", max: 4}
   deal_page:
     - name: top-deals
-      selector: "[data-testid='deal-card'], [data-testid='DealCard'], [data-testid*='deal-card'], [data-component-type='deal-card'], .DealCard-module__card"
-      fallback_selector: "a[href*='/dp/']:has(img)"
+      selector: "[data-testid='product-card'], .dcl-product[data-csa-c-item-id], .dcl-product"
       max: 10
       wait_ms: 500
       save_html_on_miss: true
