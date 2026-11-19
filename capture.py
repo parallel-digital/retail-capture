@@ -343,6 +343,12 @@ async def capture_one(ctx, row, cfg, run_dir):
         result["data_extraction_status"] = "disabled"
         result["data_record_count"] = None
         result["data_extraction_error"] = None
+        if row["page_type"] == "deal_page":
+                await page.evaluate("""() => {
+                  const a = document.querySelector('#dealsGridLinkAnchor');
+                  if (a) a.scrollIntoView({block: 'start'});
+                }""")
+                await page.wait_for_timeout(1500)
         if collection.get("extract_structured_data", False):
             try:
                 payload = await extract_page_data(page, row, result["captured_at"])
