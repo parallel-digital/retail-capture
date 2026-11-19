@@ -76,35 +76,52 @@ async def screenshot_page(page, path, page_type):
         await page.screenshot(path=str(path), full_page=True)
         return
 
-    # Amazon deal pages virtualize the grid. A browser full-page screenshot may
-    # capture only the viewport or a huge blank spacer. Build a deterministic
-    # composite instead: page header/filter area + the first loaded deal grid.
-    grid = page.locator("[data-testid='discount-asin-grid']").first
+    # Amazon deal pages use a virtualized grid whose DOM container can be much
+    # taller than the content actually painted. Do NOT screenshot the grid
+    # element itself. Instead, find the bottom of the currently rendered deal
+    # cards and capture only the meaningful document region above that point.
     try:
-        await grid.wait_for(state="visible", timeout=20000)
-        box = await grid.bounding_box()
-        if not box:
-            raise RuntimeError("deal grid has no bounding box")
-
         await page.evaluate("window.scrollTo(0, 0)")
-        await page.wait_for_timeout(500)
+        await page.wait_for_timeout(700)
         viewport = page.viewport_size or {"width": 1440, "height": 900}
-        header_height = max(1, min(int(box["y"]), 1600))
-        header_png = await page.screenshot(
-            clip={"x": 0, "y": 0, "width": viewport["width"], "height": header_height}
-        )
-        grid_png = await grid.screenshot()
 
-        header = Image.open(io.BytesIO(header_png)).convert("RGB")
-        deals = Image.open(io.BytesIO(grid_png)).convert("RGB")
-        width = max(header.width, deals.width)
-        canvas = Image.new("RGB", (width, header.height + deals.height), "white")
-        canvas.paste(header, (0, 0))
-        canvas.paste(deals, (0, header.height))
-        canvas.save(path, format="PNG")
+        bounds = await page.evaluate("""() => {
+          const visible = (el) => {
+            const r = el.getBoundingClientRect();
+            const s = getComputedStyle(el);
+            return r.width > 20 && r.height > 20 && s.display !== 'none' &&
+                   s.visibility !== 'hidden' && Number(s.opacity || 1) !== 0;
+          };
+          const nodes = [...document.querySelectorAll(
+            '[data-testid="discount-asin-grid"] [data-asin], ' +
+            '[data-testid="discount-asin-grid"] a[href*="/dp/"], ' +
+            'a[href*="/dp/"]'
+          )].filter(visible);
+          const rects = nodes.map(el => el.getBoundingClientRect())
+            .filter(r => r.top >= 0 && r.bottom > 0 && r.bottom < 5000);
+          if (!rects.length) return null;
+          return {
+            bottom: Math.ceil(Math.max(...rects.map(r => r.bottom + window.scrollY)))
+          };
+        }""")
+
+        if not bounds or not bounds.get("bottom"):
+            raise RuntimeError("no rendered deal-card bounds found")
+
+        # Include a small footer margin, but never Amazon's enormous virtualized
+        # spacer. 2200 px comfortably covers the hero, filters, and several deal
+        # rows at the app's standard viewport size.
+        meaningful_height = min(max(int(bounds["bottom"]) + 40, viewport["height"]), 2200)
+        await page.screenshot(
+            path=str(path),
+            clip={"x": 0, "y": 0, "width": viewport["width"], "height": meaningful_height},
+        )
     except Exception:
-        # Preserve evidence even if Amazon changes the grid markup.
-        await page.screenshot(path=str(path), full_page=True)
+        # Last-resort evidence: viewport-only is preferable to a 4,000+ px blank
+        # full-page image on a virtualized Amazon page.
+        await page.evaluate("window.scrollTo(0, 0)")
+        await page.wait_for_timeout(300)
+        await page.screenshot(path=str(path), full_page=False)
 
 
 async def dismiss(page, selectors):
