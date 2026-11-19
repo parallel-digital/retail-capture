@@ -226,19 +226,17 @@ DEAL_PAGE_JS = r"""() => {
     const el = node.querySelector(selector);
     return el ? el.getAttribute(name) : null;
   };
+  const grid = document.querySelector("[data-testid='discount-asin-grid']");
   const selectors = [
     "[data-testid='product-card']",
     ".dcl-product[data-csa-c-item-id]",
-    ".dcl-product",
-    "[data-testid='deal-card']",
-    "[data-testid='DealCard']",
-    "[data-testid*='deal-card']",
-    "[data-component-type='deal-card']"
+    ".dcl-product"
   ];
   const seen = new Set();
   const cards = [];
+  const root = grid || document;
   for (const selector of selectors) {
-    for (const card of document.querySelectorAll(selector)) {
+    for (const card of root.querySelectorAll(selector)) {
       if (!seen.has(card)) { seen.add(card); cards.push(card); }
     }
   }
@@ -250,7 +248,7 @@ DEAL_PAGE_JS = r"""() => {
     const asin = card.getAttribute('data-asin') ||
       ((itemId.match(/amzn1\.asin\.([A-Z0-9]{10})/i) || [])[1] || null) ||
       (((href || '').match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i) || [])[1] || null);
-    const title = text(card, "[data-testid*='title'], [class*='title'], h2, h3, a[title]") ||
+    const title = text(card, ".a-truncate-full.a-offscreen, .a-truncate-cut, [class*='ProductCard-module__title'], [data-testid='product-title']") ||
       attr(card, 'a[title]', 'title') || attr(card, 'img[alt]', 'alt');
     const visible = clean(card.innerText) || '';
     const dealPrice = text(card, ".a-price .a-offscreen, [data-testid*='price'], [class*='price'] .a-offscreen");
@@ -264,8 +262,8 @@ DEAL_PAGE_JS = r"""() => {
     const status = [...card.querySelectorAll('span, div')]
       .map(e => clean(e.textContent))
       .find(v => v && /sold out|deal claimed|ends in|starts in|available/i.test(v)) || null;
-    const rating = text(card, "i.a-icon-star span.a-icon-alt, i.a-icon-star-small span.a-icon-alt, [aria-label*='out of 5 stars']");
-    const reviews = text(card, "a[href*='#customerReviews'] span, [aria-label*='ratings'], [class*='review']");
+    const rating = text(card, ".review-value, [class*='RatingSummary-module__root'], [aria-label*='out of 5 stars']");
+    const reviews = text(card, "[data-testid='product-reviews'], a[href*='customerReviews'] span, a[href*='/portal/customer-reviews'] span");
     if (!href && !asin && !title) continue;
     rows.push({
       deal_rank: rows.length + 1,

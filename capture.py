@@ -36,19 +36,18 @@ async def autoscroll(page, pause):
 
 
 async def prepare_deal_page(page, pause):
-    """Load the first deal batch without walking Amazon's virtual infinite list."""
-    await page.evaluate("window.scrollTo(0, 0)")
+    """Hydrate the first filtered deal grid without traversing the virtual list."""
+    grid = page.locator("[data-testid='discount-asin-grid']")
     try:
-        await page.locator("[data-testid='discount-asin-grid']").wait_for(state="attached", timeout=15000)
+        await grid.wait_for(state="visible", timeout=20000)
+        await grid.scroll_into_view_if_needed()
+        for _ in range(8):
+            if await grid.locator("[data-testid='product-card']").count() >= 10:
+                break
+            await page.mouse.wheel(0, 650)
+            await page.wait_for_timeout(max(pause, 500))
     except Exception:
         pass
-    # A short controlled scroll hydrates the first ten cards. Generic autoscroll
-    # advances the virtual list hundreds of products and creates a huge blank image.
-    for y in (700, 1400, 2100):
-        await page.evaluate(f"window.scrollTo(0, {y})")
-        await page.wait_for_timeout(pause)
-        if await page.locator("[data-testid='product-card']").count() >= 10:
-            break
     await page.evaluate("window.scrollTo(0, 0)")
     await page.wait_for_timeout(1000)
 
@@ -57,12 +56,20 @@ async def screenshot_page(page, path, page_type):
     if page_type != "deal_page":
         await page.screenshot(path=str(path), full_page=True)
         return
-    # Amazon deal pages use a virtual/infinite grid with a large spacer. Capture
-    # the useful first section rather than the synthetic document height.
-    metrics = await page.evaluate("""() => ({
-      width: Math.max(document.documentElement.clientWidth, window.innerWidth),
-      height: Math.min(Math.max(document.documentElement.clientHeight, 4200), 5200)
-    })""")
+    metrics = await page.evaluate("""() => {
+      const grid = document.querySelector("[data-testid='discount-asin-grid']");
+      const cards = grid ? [...grid.querySelectorAll("[data-testid='product-card']")].slice(0, 10) : [];
+      let bottom = window.innerHeight;
+      if (grid) {
+        const r = grid.getBoundingClientRect();
+        bottom = Math.max(bottom, r.top + window.scrollY + r.height);
+      }
+      for (const card of cards) {
+        const r = card.getBoundingClientRect();
+        bottom = Math.max(bottom, r.bottom + window.scrollY);
+      }
+      return {width: Math.max(document.documentElement.clientWidth, window.innerWidth), height: Math.min(Math.ceil(bottom + 250), 16000)};
+    }""")
     await page.screenshot(path=str(path), clip={"x": 0, "y": 0, "width": metrics["width"], "height": metrics["height"]})
 
 
@@ -198,7 +205,7 @@ async def capture_one(ctx, row, cfg, run_dir):
         if row["page_type"] == "deal_page" and not rules:
             rules = [{
                 "name": "top-deals",
-                "selector": "[data-testid='product-card'], .dcl-product[data-csa-c-item-id], .dcl-product",
+                "selector": "[data-testid='discount-asin-grid'] [data-testid='product-card']",
                 "max": 10,
                 "wait_ms": 500,
                 "save_html_on_miss": True,
