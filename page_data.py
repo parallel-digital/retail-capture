@@ -9,6 +9,8 @@ import json
 import re
 from pathlib import Path
 
+DEAL_COLLECTION_LIMIT = 10
+
 MONEY_RE = re.compile(r"-?\$?([0-9][0-9,]*(?:\.[0-9]{1,2})?)")
 NUMBER_RE = re.compile(r"([0-9][0-9,]*(?:\.[0-9]+)?)")
 
@@ -103,10 +105,50 @@ def _list_price(value, visible_text=None):
     if amount is not None:
         return amount
     if visible_text:
-        match = re.search(r"\bList:\s*\$\s*([0-9][0-9,]*(?:\.\d{1,2})?)", visible_text, re.I)
+        match = re.search(
+            r"\b(?:List(?:\s+Price)?|Typical(?:\s+price)?):?\s*(?:List(?:\s+Price)?:?\s*)?\$\s*([0-9][0-9,]*(?:\.\d{1,2})?)",
+            visible_text, re.I)
         if match:
             return float(match.group(1).replace(",", ""))
     return None
+
+
+# ---------------------------------------------------------------------------
+# Deal-page helpers
+# ---------------------------------------------------------------------------
+
+PROMO_TITLE_RE = re.compile(
+    r"^\s*(?:\d{1,3}%\s*off|ends in|starts in|black friday deal|cyber monday deal|"
+    r"limited time deal|deal price|prime deal|deal of the day)", re.I)
+
+
+def _is_promo_title(value):
+    return not value or bool(PROMO_TITLE_RE.search(str(value))) or len(str(value).strip()) < 8
+
+
+def _deal_title_from_text(visible):
+    """Recover the product title from deal-card text.
+
+    Card text looks like:
+      '33% off Ends in 12:06:54 Deal Price: $299.99 $299 . 99 List: List: $449.99 $449.99
+       KitchenAid Artisan Mini ... KSM3316XWH KitchenAid Artisan Mini, 3.5-Qt Tilt… 4.8 (5K) ...'
+    The full title follows the last clean price and is followed by a truncated repeat.
+    """
+    if not visible:
+        return None
+    match = re.search(
+        r"\$[0-9][0-9,]*\.\d{2}\s+(?!\$|List|Typical|Deal)([A-Za-z0-9].+?)\s+[0-5]\.\d\s*\(",
+        visible)
+    if not match:
+        return None
+    title = match.group(1).strip()
+    # Drop the truncated duplicate Amazon renders after the full title.
+    prefix = title[:25]
+    repeat = title.find(prefix, 1) if len(prefix) >= 10 else -1
+    if repeat > 0:
+        title = title[:repeat].strip()
+    title = title.rstrip("…").strip()
+    return None if _is_promo_title(title) else title
 
 
 def _deal_rating_from_text(value):
@@ -116,23 +158,52 @@ def _deal_rating_from_text(value):
     if not value:
         return None
     # Deal cards often expose only "4.7 (5.5K)" in visible text.
-    match = re.search(r"\b([0-5](?:\.\d)?)\s*\([0-9]+(?:\.[0-9]+)?[KkMm]?\)", str(value))
+    match = re.search(r"\b([0-5]\.\d)\s*\([0-9]+(?:\.[0-9]+)?[KkMm]?\)", str(value))
     return float(match.group(1)) if match else None
+
 
 def _deal_brand(item):
     visible = item.get("visible_text") or ""
     match = re.search(r"\bShop\s+(.+?)\s+deals\b", visible, re.I)
     if match:
         brand = re.sub(r"\s+", " ", match.group(1)).strip()
-        return brand if len(brand) <= 60 else None
+        if brand and len(brand) <= 60:
+            return brand
     return _brand_from_title(item.get("title"))
 
-def _normalize_deal_status(value):
-    if not value:
-        return None
-    text = re.sub(r"^\s*\d{1,3}%\s*off\s*", "", str(value), flags=re.I).strip()
-    m = re.search(r"(Ends in\s+\d{1,2}:\d{2}:\d{2}|Starts in\s+[^|]+|Sold out|Deal claimed|Available)", text, re.I)
-    return m.group(1) if m else (text or None)
+
+DISCOUNT_RE = re.compile(r"\b(\d{1,3})%\s*off\b", re.I)
+STATUS_RE = re.compile(
+    r"(Ends in\s+(?:\d{1,2}:)?\d{1,2}:\d{2}|Starts in\s+[^|$]+?(?=\s+Deal|\s+\$|$)|Sold out|Deal claimed|"
+    r"\d{1,3}%\s+claimed)", re.I)
+BADGE_ONLY_RE = re.compile(
+    r"(Black Friday Deal|Cyber Monday Deal|Limited time deal|Prime (?:Big )?Deal|Deal of the Day|Lightning Deal)",
+    re.I)
+
+
+def _normalize_deal_fields(item):
+    evidence = " ".join(str(item.get(k) or "") for k in ("deal_status", "deal_badge", "discount_text", "visible_text"))
+    disc = DISCOUNT_RE.search(str(item.get("discount_text") or "")) or DISCOUNT_RE.search(evidence)
+    item["discount_text"] = f"{disc.group(1)}% off" if disc else None
+
+    status = STATUS_RE.search(evidence)
+    status_text = status.group(1).strip() if status else None
+    # "% claimed" belongs in its own field, not status.
+    if status_text and status_text.lower().endswith("claimed") and "deal" not in status_text.lower():
+        item["claimed_pct"] = float(re.match(r"\d+", status_text).group(0))
+        status_text = None
+        ends = re.search(r"Ends in\s+(?:\d{1,2}:)?\d{1,2}:\d{2}", evidence, re.I)
+        status_text = ends.group(0) if ends else None
+    item["deal_status"] = status_text
+
+    if item.get("claimed_pct") is None:
+        claimed = re.search(r"\b(\d{1,3})%\s+claimed\b", evidence, re.I)
+        item["claimed_pct"] = float(claimed.group(1)) if claimed else None
+
+    badge = BADGE_ONLY_RE.search(evidence)
+    item["deal_badge"] = badge.group(1) if badge else None
+    return item
+
 
 BADGE_PATTERNS = [
     (re.compile(r"\bAmazon'?s Choice\b", re.I), "Amazon's Choice"),
@@ -241,7 +312,13 @@ BESTSELLER_JS = r"""() => [...document.querySelectorAll('#gridItemRoot')].map((c
   };
 })"""
 
-DEAL_PAGE_JS = r"""() => {
+# Deal grid extraction.
+# - Scopes to the main grid (cards at/below #dealsGridLinkAnchor), excluding the
+#   featured carousel at the top of the page.
+# - Orders cards by on-screen position (row, then column), not DOM order, so
+#   rank 1 is always the top-left grid card.
+# - Dedupes by ASIN and returns the total grid cards detected plus the top N.
+DEAL_PAGE_JS = r"""(limit) => {
   const clean = value => (value || '').replace(/\s+/g, ' ').trim() || null;
   const text = (node, selector) => {
     const el = node.querySelector(selector);
@@ -251,6 +328,11 @@ DEAL_PAGE_JS = r"""() => {
     const el = node.querySelector(selector);
     return el ? el.getAttribute(name) : null;
   };
+  const promo = v => !v || /^\s*(\d{1,3}%\s*off|ends in|starts in|black friday deal|cyber monday deal|limited time deal|deal price|prime deal|deal of the day)/i.test(v) || v.length < 8;
+
+  const anchor = document.querySelector("#dealsGridLinkAnchor, [data-testid='discount-asin-grid']");
+  const gridTop = anchor ? anchor.getBoundingClientRect().top + window.scrollY : null;
+
   const selectors = [
     "[data-testid='product-card']",
     ".dcl-product[data-csa-c-item-id]",
@@ -260,59 +342,81 @@ DEAL_PAGE_JS = r"""() => {
     "[data-testid*='deal-card']",
     "[data-component-type='deal-card']"
   ];
-  const seen = new Set();
+  const seenNodes = new Set();
   const cards = [];
   for (const selector of selectors) {
     for (const card of document.querySelectorAll(selector)) {
-      if (!seen.has(card)) { seen.add(card); cards.push(card); }
+      if (seenNodes.has(card)) continue;
+      // Skip cards nested inside an already-collected card.
+      if (cards.some(c => c.contains(card) || card.contains(c))) continue;
+      seenNodes.add(card);
+      cards.push(card);
     }
   }
-  const rows = [];
+
+  const all = [];
+  const seenAsins = new Set();
   for (const card of cards) {
+    const r = card.getBoundingClientRect();
+    if (r.width < 40 || r.height < 40) continue;
+    const top = r.top + window.scrollY;
+    if (gridTop !== null && top < gridTop - 5) continue;   // featured carousel
+
     const link = card.querySelector("a[href*='/dp/'], a[href*='/gp/product/']");
     const href = link ? link.href : null;
     const itemId = card.getAttribute('data-csa-c-item-id') || '';
     const asin = card.getAttribute('data-asin') ||
       ((itemId.match(/amzn1\.asin\.([A-Z0-9]{10})/i) || [])[1] || null) ||
       (((href || '').match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i) || [])[1] || null);
-    const title = text(card, ".a-truncate-full.a-offscreen, .a-truncate-cut, [class*='ProductCard-module__title'], [data-testid='product-title']") ||
-      attr(card, 'a[title]', 'title') || attr(card, 'img[alt]', 'alt');
+    if (asin && seenAsins.has(asin)) continue;
+
+    // Title: product link label first, then title nodes, then image alt.
+    const candidates = [];
+    for (const a of card.querySelectorAll("a[href*='/dp/'], a[href*='/gp/product/']")) {
+      candidates.push(clean(a.getAttribute('aria-label')), clean(a.getAttribute('title')));
+    }
+    candidates.push(
+      text(card, ".a-truncate-full.a-offscreen"),
+      text(card, "[data-testid='product-title']"),
+      text(card, "[class*='ProductCard-module__title']"),
+      text(card, ".a-truncate-cut"),
+      attr(card, 'img[alt]', 'alt')
+    );
+    const title = candidates.find(v => !promo(v)) || null;
+
     const visible = clean(card.innerText) || '';
-    const dealPrice = text(card, ".a-price .a-offscreen, [data-testid*='price'], [class*='price'] .a-offscreen");
+    const dealPrice = text(card, ".a-price:not(.a-text-price) .a-offscreen, [data-testid*='price'] .a-offscreen");
     const listPrice = text(card, ".a-price.a-text-price .a-offscreen, .a-text-price .a-offscreen, [data-testid*='list-price']");
-    const discountText = [...card.querySelectorAll('span, div')]
-      .map(e => clean(e.textContent))
-      .find(v => v && (/\b\d{1,3}%\s*off\b/i.test(v) || /save\s+\$?\d/i.test(v))) || null;
-    const dealBadge = [...card.querySelectorAll('span, div')]
-      .map(e => clean(e.textContent))
-      .find(v => v && /limited time deal|black friday deal|cyber monday deal|prime deal|deal of the day/i.test(v)) || null;
-    const status = [...card.querySelectorAll('span, div')]
-      .map(e => clean(e.textContent))
-      .find(v => v && /sold out|deal claimed|ends in|starts in|available/i.test(v)) || null;
-    const rating = text(card, ".review-value, [class*='RatingSummary-module__root'], [aria-label*='out of 5 stars']");
-    const reviews = text(card, "a[href*='#customerReviews'] span, [aria-label*='ratings'], [class*='review']");
+    const ratingAria = attr(card, "[aria-label*='out of 5 stars']", 'aria-label');
+    const rating = ratingAria || text(card, ".review-value, [class*='RatingSummary-module__root']");
+    const shopDeals = [...card.querySelectorAll('a, span')].map(e => clean(e.textContent)).find(v => v && /^Shop .+ deals$/i.test(v));
+    const brand = shopDeals ? shopDeals.replace(/^Shop\s+/i, '').replace(/\s+deals$/i, '') : null;
     if (!href && !asin && !title) continue;
-    rows.push({
-      deal_rank: rows.length + 1,
-      position: rows.length + 1,
+    if (asin) seenAsins.add(asin);
+
+    all.push({
+      _top: Math.round(top),
+      _left: Math.round(r.left),
       asin,
       title,
-      brand: null,
+      brand,
       deal_price_text: dealPrice,
       list_price_text: listPrice,
-      discount_text: discountText,
-      deal_badge: dealBadge,
-      deal_status: status,
       rating_text: rating,
-      review_count_text: reviews,
       prime: !!card.querySelector("i.a-icon-prime, [aria-label*='Prime']"),
       image_url: attr(card, 'img', 'src'),
       product_url: href,
       visible_text: visible.slice(0, 1500)
     });
-    if (rows.length >= 10) break;
   }
-  return rows;
+
+  // Visual order: group into rows (cards within 20px vertically), then left to right.
+  all.sort((a, b) => (Math.abs(a._top - b._top) > 20 ? a._top - b._top : a._left - b._left));
+  const rows = all.slice(0, limit).map((item, i) => {
+    delete item._top; delete item._left;
+    return Object.assign({ deal_rank: i + 1, position: i + 1 }, item);
+  });
+  return { total: all.length, rows, gridFound: gridTop !== null };
 }"""
 
 PDP_JS = r"""() => {
@@ -340,11 +444,17 @@ PDP_JS = r"""() => {
   };
 }"""
 
+PAGE_ASIN_COUNT_JS = r"""() => new Set(
+  [...document.querySelectorAll('a[href*="/dp/"], [data-asin]')]
+    .map(e => e.getAttribute('data-asin') || ((e.href || '').match(/\/dp\/([A-Z0-9]{10})/i) || [])[1])
+    .filter(Boolean)
+).size"""
+
 
 async def extract_page_data(page, row, captured_at):
     page_type = (row.get("page_type") or "other").lower()
     payload = {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "captured_at": captured_at,
         "account": row.get("account"),
         "retailer": row.get("retailer"),
@@ -356,6 +466,7 @@ async def extract_page_data(page, row, captured_at):
         "extraction_status": "ok",
         "page_key": _page_key(row),
     }
+
     if page_type == "search":
         rows = await page.evaluate(SEARCH_JS)
         for item in rows:
@@ -371,6 +482,7 @@ async def extract_page_data(page, row, captured_at):
         payload["search_term"] = unquote_plus(query_term) if query_term else row.get("search_term")
         payload["result_count"] = len(rows)
         payload["results"] = rows
+
     elif page_type == "bestsellers":
         rows = await page.evaluate(BESTSELLER_JS)
         for item in rows:
@@ -382,24 +494,34 @@ async def extract_page_data(page, row, captured_at):
             _enrich_result(item, row, payload["page_key"])
         payload["item_count"] = len(rows)
         payload["items"] = rows
+
     elif page_type == "deal_page":
-        rows = await page.evaluate(DEAL_PAGE_JS)
+        result = await page.evaluate(DEAL_PAGE_JS, DEAL_COLLECTION_LIMIT)
+        rows = result.get("rows", [])
         for item in rows:
+            visible = item.get("visible_text") or ""
+            if _is_promo_title(item.get("title")):
+                item["title"] = _deal_title_from_text(visible)
             item["deal_price"] = _money(item.pop("deal_price_text", None))
             item["price"] = item["deal_price"]
-            item["list_price"] = _list_price(item.pop("list_price_text", None), item.get("visible_text"))
-            rating_text = item.pop("rating_text", None)
-            item["rating"] = _rating_from_text(rating_text)
-            reviews = item.pop("review_count_text", None)
-            item["review_count"] = _review_count(reviews)
+            item["list_price"] = _list_price(item.pop("list_price_text", None), visible)
+            item["rating"] = _deal_rating_from_text(item.pop("rating_text", None)) or _deal_rating_from_text(visible)
+            item["review_count"] = _review_count(visible)
             _enrich_result(item, row, payload["page_key"])
-            item["deal_rank"] = item.get("deal_rank") or item.get("position")
+            item["brand"] = item.get("brand") or _deal_brand(item)
+            _normalize_deal_fields(item)
             item.pop("price", None)
-        payload["deal_count_detected"] = len(rows)
+        try:
+            payload["page_product_asins_detected"] = await page.evaluate(PAGE_ASIN_COUNT_JS)
+        except Exception:
+            payload["page_product_asins_detected"] = None
+        payload["deal_grid_found"] = bool(result.get("gridFound"))
+        payload["deal_cards_detected"] = result.get("total", len(rows))
         payload["deals_collected"] = len(rows)
-        payload["deal_collection_limit"] = 10
+        payload["deal_collection_limit"] = DEAL_COLLECTION_LIMIT
         payload["deal_count"] = len(rows)
         payload["deals"] = rows
+
     elif page_type.startswith("pdp"):
         item = await page.evaluate(PDP_JS)
         item["price"] = _money(item.pop("price_text", None))
@@ -411,9 +533,11 @@ async def extract_page_data(page, row, captured_at):
         item["brand"] = _brand_from_title(item.get("title")) or (re.sub(r"^(?:Visit the )?", "", item.get("brand") or "", flags=re.I).replace(" Store", "").strip() or None)
         item["result_key"] = f"{payload['page_key']}|{str(item.get('asin') or 'product').lower()}"
         payload["product"] = item
+
     else:
         payload["extraction_status"] = "not_supported"
         payload["body_text_preview"] = (await page.locator('body').inner_text())[:5000]
+
     return payload
 
 
