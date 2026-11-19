@@ -18,6 +18,7 @@ from playwright.async_api import async_playwright
 from common import DATA as ROOT, read_urls, slug
 import manifest
 import runtime_control as runtime
+from page_data import extract_page_data, write_page_data
 
 
 async def autoscroll(page, pause):
@@ -122,8 +123,42 @@ async def capture_one(ctx, row, cfg, run_dir):
         await page.screenshot(path=str(folder / "full.png"), full_page=True)
         result["title"] = title
 
-        if cfg.get("debug_html"):
-            (folder / "page.html").write_text(await page.content(), encoding="utf-8")
+        # Save the rendered DOM as a durable source artifact. Keep debug_html as
+        # a backward-compatible override for older config files.
+        collection = cfg.get("collection", {}) or {}
+        save_html = bool(collection.get("save_html", cfg.get("debug_html", False)))
+        if save_html:
+            html_path = folder / "page.html"
+            html_path.write_text(await page.content(), encoding="utf-8")
+            result["html_file"] = html_path.name
+
+        # Structured extraction is best-effort. A parser failure must not discard
+        # a successful screenshot or raw HTML capture.
+        result["data_extraction_status"] = "disabled"
+        result["data_record_count"] = None
+        result["data_extraction_error"] = None
+        if collection.get("extract_structured_data", False):
+            try:
+                payload = await extract_page_data(page, row, result["captured_at"])
+                data_path = write_page_data(folder, payload)
+                result["page_data_file"] = data_path.name
+                result["data_extraction_status"] = payload.get("extraction_status", "ok")
+                records = payload.get("results")
+                if records is None:
+                    records = payload.get("items")
+                if records is None:
+                    records = payload.get("deals")
+                if records is not None:
+                    result["data_record_count"] = len(records)
+                elif payload.get("product") is not None:
+                    result["data_record_count"] = 1
+                else:
+                    result["data_record_count"] = 0
+            except Exception as exc:
+                result["data_extraction_status"] = "failed"
+                result["data_record_count"] = 0
+                result["data_extraction_error"] = str(exc)
+
         report = {}
         rules = cfg.get("clips", {}).get(row["page_type"], [])
         if not rules:

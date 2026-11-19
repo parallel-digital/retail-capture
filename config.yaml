@@ -69,8 +69,13 @@ clips:
     - {name: sponsored-brand-footer, selector: ".AdHolder:has([cel_widget_id*='brand-footer'])", max: 1}
     # Display ads: left skyscrapers and bottom banner
     - {name: sponsored-display, selector: ".AdHolder:has([cel_widget_id^='loom-desktop-skyscraper']), .AdHolder:has([cel_widget_id^='loom-desktop-footer-slot'])", max: 4}
-  deals:
-    - {name: deal-tiles, selector: "[data-testid='deal-card'], [data-testid='DealCard']", max: 6}
+  deal_page:
+    - name: top-deals
+      selector: "[data-testid='deal-card'], [data-testid='DealCard'], [data-testid*='deal-card'], [data-component-type='deal-card'], .DealCard-module__card"
+      fallback_selector: "a[href*='/dp/']:has(img)"
+      max: 10
+      wait_ms: 500
+      save_html_on_miss: true
   pdp_brand_story:
     # Amazon product page (/dp/ASIN). Each module is found by its visible heading, then its whole section is clipped.
     - {name: from-the-brand, heading: "From the brand", wait_ms: 1500, save_html_on_miss: true}

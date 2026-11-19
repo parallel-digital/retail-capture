@@ -216,6 +216,77 @@ BESTSELLER_JS = r"""() => [...document.querySelectorAll('#gridItemRoot')].map((c
   };
 })"""
 
+DEAL_PAGE_JS = r"""() => {
+  const clean = value => (value || '').replace(/\s+/g, ' ').trim() || null;
+  const text = (node, selector) => {
+    const el = node.querySelector(selector);
+    return el ? clean(el.textContent) : null;
+  };
+  const attr = (node, selector, name) => {
+    const el = node.querySelector(selector);
+    return el ? el.getAttribute(name) : null;
+  };
+  const selectors = [
+    "[data-testid='deal-card']",
+    "[data-testid='DealCard']",
+    "[data-testid*='deal-card']",
+    "[data-component-type='deal-card']",
+    ".DealCard-module__card",
+    ".a-section[id*='deal']"
+  ];
+  const seen = new Set();
+  const cards = [];
+  for (const selector of selectors) {
+    for (const card of document.querySelectorAll(selector)) {
+      if (!seen.has(card)) { seen.add(card); cards.push(card); }
+    }
+  }
+  const rows = [];
+  for (const card of cards) {
+    const link = card.querySelector("a[href*='/dp/'], a[href*='/gp/product/']");
+    const href = link ? link.href : null;
+    const asin = card.getAttribute('data-asin') ||
+      (((href || '').match(/\/(?:dp|gp\/product)\/([A-Z0-9]{10})/i) || [])[1] || null);
+    const title = text(card, "[data-testid*='title'], [class*='title'], h2, h3, a[title]") ||
+      attr(card, 'a[title]', 'title') || attr(card, 'img[alt]', 'alt');
+    const visible = clean(card.innerText) || '';
+    const dealPrice = text(card, ".a-price .a-offscreen, [data-testid*='price'], [class*='price'] .a-offscreen");
+    const listPrice = text(card, ".a-price.a-text-price .a-offscreen, .a-text-price .a-offscreen, [data-testid*='list-price']");
+    const discountText = [...card.querySelectorAll('span, div')]
+      .map(e => clean(e.textContent))
+      .find(v => v && (/\b\d{1,3}%\s*off\b/i.test(v) || /save\s+\$?\d/i.test(v))) || null;
+    const dealBadge = [...card.querySelectorAll('span, div')]
+      .map(e => clean(e.textContent))
+      .find(v => v && /limited time deal|black friday deal|cyber monday deal|prime deal|deal of the day/i.test(v)) || null;
+    const status = [...card.querySelectorAll('span, div')]
+      .map(e => clean(e.textContent))
+      .find(v => v && /sold out|deal claimed|ends in|starts in|available/i.test(v)) || null;
+    const rating = text(card, "i.a-icon-star span.a-icon-alt, i.a-icon-star-small span.a-icon-alt, [aria-label*='out of 5 stars']");
+    const reviews = text(card, "a[href*='#customerReviews'] span, [aria-label*='ratings'], [class*='review']");
+    if (!href && !asin && !title) continue;
+    rows.push({
+      deal_rank: rows.length + 1,
+      position: rows.length + 1,
+      asin,
+      title,
+      brand: null,
+      deal_price_text: dealPrice,
+      list_price_text: listPrice,
+      discount_text: discountText,
+      deal_badge: dealBadge,
+      deal_status: status,
+      rating_text: rating,
+      review_count_text: reviews,
+      prime: !!card.querySelector("i.a-icon-prime, [aria-label*='Prime']"),
+      image_url: attr(card, 'img', 'src'),
+      product_url: href,
+      visible_text: visible.slice(0, 1500)
+    });
+    if (rows.length >= 10) break;
+  }
+  return rows;
+}"""
+
 PDP_JS = r"""() => {
   const clean = value => (value || '').replace(/\s+/g, ' ').trim() || null;
   const text = selector => { const el = document.querySelector(selector); return el ? clean(el.textContent) : null; };
@@ -283,6 +354,24 @@ async def extract_page_data(page, row, captured_at):
             _enrich_result(item, row, payload["page_key"])
         payload["item_count"] = len(rows)
         payload["items"] = rows
+    elif page_type == "deal_page":
+        rows = await page.evaluate(DEAL_PAGE_JS)
+        for item in rows:
+            item["deal_price"] = _money(item.pop("deal_price_text", None))
+            item["price"] = item["deal_price"]
+            item["list_price"] = _list_price(item.pop("list_price_text", None), item.get("visible_text"))
+            rating_text = item.pop("rating_text", None)
+            item["rating"] = _rating_from_text(rating_text)
+            reviews = item.pop("review_count_text", None)
+            item["review_count"] = _review_count(reviews)
+            _enrich_result(item, row, payload["page_key"])
+            item["deal_rank"] = item.get("deal_rank") or item.get("position")
+            item.pop("price", None)
+        payload["deal_count_detected"] = len(rows)
+        payload["deals_collected"] = len(rows)
+        payload["deal_collection_limit"] = 10
+        payload["deal_count"] = len(rows)
+        payload["deals"] = rows
     elif page_type.startswith("pdp"):
         item = await page.evaluate(PDP_JS)
         item["price"] = _money(item.pop("price_text", None))
