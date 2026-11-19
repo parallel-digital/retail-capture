@@ -7,13 +7,14 @@
 
 Output: <output_dir>/<account>/<retailer>/<YYYY-MM-DD>/<HHMM>/<name>/full.png + clips/
 """
-import argparse, asyncio, atexit, json, os, random, subprocess, urllib.request
+import argparse, asyncio, atexit, io, json, os, random, subprocess, urllib.request
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
 import yaml
 from playwright.async_api import async_playwright
+from PIL import Image
 
 from common import DATA as ROOT, read_urls, slug
 import manifest
@@ -36,18 +37,19 @@ async def autoscroll(page, pause):
 
 
 async def prepare_deal_page(page, pause):
-    """Hydrate the first filtered deal grid without traversing the virtual list."""
-    grid = page.locator("[data-testid='discount-asin-grid']")
+    """Load the first deal batch without walking Amazon's virtual infinite list."""
+    await page.evaluate("window.scrollTo(0, 0)")
     try:
-        await grid.wait_for(state="visible", timeout=20000)
-        await grid.scroll_into_view_if_needed()
-        for _ in range(8):
-            if await grid.locator("[data-testid='product-card']").count() >= 10:
-                break
-            await page.mouse.wheel(0, 650)
-            await page.wait_for_timeout(max(pause, 500))
+        await page.locator("[data-testid='discount-asin-grid']").wait_for(state="attached", timeout=15000)
     except Exception:
         pass
+    # A short controlled scroll hydrates the first ten cards. Generic autoscroll
+    # advances the virtual list hundreds of products and creates a huge blank image.
+    for y in (700, 1400, 2100):
+        await page.evaluate(f"window.scrollTo(0, {y})")
+        await page.wait_for_timeout(pause)
+        if await page.locator("[data-testid='product-card']").count() >= 10:
+            break
     await page.evaluate("window.scrollTo(0, 0)")
     await page.wait_for_timeout(1000)
 
@@ -56,21 +58,36 @@ async def screenshot_page(page, path, page_type):
     if page_type != "deal_page":
         await page.screenshot(path=str(path), full_page=True)
         return
-    metrics = await page.evaluate("""() => {
-      const grid = document.querySelector("[data-testid='discount-asin-grid']");
-      const cards = grid ? [...grid.querySelectorAll("[data-testid='product-card']")].slice(0, 10) : [];
-      let bottom = window.innerHeight;
-      if (grid) {
-        const r = grid.getBoundingClientRect();
-        bottom = Math.max(bottom, r.top + window.scrollY + r.height);
-      }
-      for (const card of cards) {
-        const r = card.getBoundingClientRect();
-        bottom = Math.max(bottom, r.bottom + window.scrollY);
-      }
-      return {width: Math.max(document.documentElement.clientWidth, window.innerWidth), height: Math.min(Math.ceil(bottom + 250), 16000)};
-    }""")
-    await page.screenshot(path=str(path), clip={"x": 0, "y": 0, "width": metrics["width"], "height": metrics["height"]})
+
+    # Amazon deal pages virtualize the grid. A browser full-page screenshot may
+    # capture only the viewport or a huge blank spacer. Build a deterministic
+    # composite instead: page header/filter area + the first loaded deal grid.
+    grid = page.locator("[data-testid='discount-asin-grid']").first
+    try:
+        await grid.wait_for(state="visible", timeout=20000)
+        box = await grid.bounding_box()
+        if not box:
+            raise RuntimeError("deal grid has no bounding box")
+
+        await page.evaluate("window.scrollTo(0, 0)")
+        await page.wait_for_timeout(500)
+        viewport = page.viewport_size or {"width": 1440, "height": 900}
+        header_height = max(1, min(int(box["y"]), 1600))
+        header_png = await page.screenshot(
+            clip={"x": 0, "y": 0, "width": viewport["width"], "height": header_height}
+        )
+        grid_png = await grid.screenshot()
+
+        header = Image.open(io.BytesIO(header_png)).convert("RGB")
+        deals = Image.open(io.BytesIO(grid_png)).convert("RGB")
+        width = max(header.width, deals.width)
+        canvas = Image.new("RGB", (width, header.height + deals.height), "white")
+        canvas.paste(header, (0, 0))
+        canvas.paste(deals, (0, header.height))
+        canvas.save(path, format="PNG")
+    except Exception:
+        # Preserve evidence even if Amazon changes the grid markup.
+        await page.screenshot(path=str(path), full_page=True)
 
 
 async def dismiss(page, selectors):
@@ -157,6 +174,9 @@ async def capture_one(ctx, row, cfg, run_dir):
         result["final_url"] = page.url
         await dismiss(page, cfg.get("dismiss_selectors", []))
         if row["page_type"] == "deal_page":
+            await page.keyboard.press("Escape")
+            await page.mouse.move(500, 350)
+
             await prepare_deal_page(page, t["scroll_pause_ms"])
         else:
             await autoscroll(page, t["scroll_pause_ms"])
@@ -205,7 +225,7 @@ async def capture_one(ctx, row, cfg, run_dir):
         if row["page_type"] == "deal_page" and not rules:
             rules = [{
                 "name": "top-deals",
-                "selector": "[data-testid='discount-asin-grid'] [data-testid='product-card']",
+                "selector": "[data-testid='product-card'], .dcl-product[data-csa-c-item-id], .dcl-product",
                 "max": 10,
                 "wait_ms": 500,
                 "save_html_on_miss": True,
