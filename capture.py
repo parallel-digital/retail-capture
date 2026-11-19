@@ -20,6 +20,8 @@ from common import DATA as ROOT, read_urls, slug
 import manifest
 import runtime_control as runtime
 from page_data import extract_page_data, write_page_data
+def is_amazon(row):
+    return "amazon" in str(row.get("retailer") or "").lower() or "amazon." in str(row.get("url") or "").lower()
 
 
 async def autoscroll(page, pause):
@@ -318,7 +320,7 @@ async def capture_one(ctx, row, cfg, run_dir):
         title = (await page.title()) or ""
         result["final_url"] = page.url
         await dismiss(page, cfg.get("dismiss_selectors", []))
-        if row["page_type"] == "deal_page":
+        if row["page_type"] == "deal_page" and is_amazon(row):
             await page.keyboard.press("Escape")
             await page.mouse.move(500, 350)
 
@@ -326,7 +328,7 @@ async def capture_one(ctx, row, cfg, run_dir):
         else:
             await autoscroll(page, t["scroll_pause_ms"])
         await ensure_clear(page, row, cfg, folder)      # a check can also appear mid-page
-        await screenshot_page(page, folder / "full.png", row["page_type"])
+        await screenshot_page(page, folder / "full.png", row["page_type"] if is_amazon(row) else "other")
         result["title"] = title
 
         # Save the rendered DOM as a durable source artifact. Keep debug_html as
@@ -373,7 +375,7 @@ async def capture_one(ctx, row, cfg, run_dir):
 
         report = {}
         rules = cfg.get("clips", {}).get(row["page_type"], [])
-        if row["page_type"] == "deal_page" and not rules:
+        if row["page_type"] == "deal_page" and not rules and is_amazon(row):
             rules = [{
                 "name": "top-deals",
                 "selector": "[data-testid='product-card'], .dcl-product[data-csa-c-item-id], .dcl-product",

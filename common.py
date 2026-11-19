@@ -1,5 +1,5 @@
 """Paths and URL-list helpers shared by the app and the capture engine."""
-import re, shutil, sys
+import os, re, shutil, sys
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -7,12 +7,18 @@ import pandas as pd
 
 FROZEN = getattr(sys, "frozen", False)
 BUNDLE = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))   # read-only app files
-DATA = (Path.home() / "RetailCapture") if FROZEN else Path(__file__).parent  # user-editable files
+
+# Profiles keep Amazon and Best Buy / Target settings, URL lists and save folders apart.
+# The default "amazon" profile uses the original folder, so existing setups are unchanged.
+PROFILE = re.sub(r"[^a-z0-9-]+", "-", os.environ.get("RETAIL_CAPTURE_PROFILE", "").strip().lower()).strip("-") or "amazon"
+_HOME = (Path.home() / "RetailCapture") if FROZEN else Path(__file__).parent
+DATA = _HOME if PROFILE == "amazon" else _HOME / "profiles" / PROFILE     # user-editable files
+
 COLS = ["account", "url", "retailer", "page_type", "name"]
 
 
 def ensure_data():
-    """On first run of the .exe, copy default config/urls to ~/RetailCapture."""
+    """On first run of a profile, copy default config/urls into its folder."""
     DATA.mkdir(parents=True, exist_ok=True)
     for f in ("config.yaml", "urls.csv"):
         if not (DATA / f).exists():
@@ -44,6 +50,7 @@ def normalize_urls(df):
     def auto(i, u):
         p = urlparse(u)
         return slug(p.path + " " + p.query)[:40] if (p.path.strip("/") or p.query) else f"page-{i + 1}"
+
     df["name"] = [n or auto(i, u) for i, (n, u) in enumerate(zip(df["name"], df["url"]))]
     dup = df.groupby(["account", "retailer", "name"]).cumcount()   # keep folder names unique
     df["name"] = [n if d == 0 else f"{n}-{d + 1}" for n, d in zip(df["name"], dup)]

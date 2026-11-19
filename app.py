@@ -15,12 +15,16 @@ except Exception:
 from common import COLS, DATA as ROOT, FROZEN, normalize_urls, read_urls
 import runtime_control as runtime
 
+PROFILE = os.environ.get("RETAIL_CAPTURE_PROFILE", "amazon")
+PROFILE_LABEL = {"amazon": "Amazon", "bby-target": "Best Buy / Target"}.get(PROFILE, PROFILE)
+
 HERE = Path(__file__).parent
 URLS = ROOT / "urls.csv"
 CFG = ROOT / "config.yaml"
 TEMPLATE = ("account,url,retailer,page_type,name\n"
             "Account A,https://www.amazon.com/gp/bestsellers/,amazon,bestsellers,amazon-bestsellers\n")
-st.set_page_config(page_title="Event Capture", layout="wide")
+st.set_page_config(page_title=f"Event Capture - {PROFILE_LABEL}", layout="wide")
+st.caption(f"Profile: **{PROFILE_LABEL}**. Settings, URL list and save folder are separate for each profile.")
 
 
 def load_cfg():
@@ -286,3 +290,25 @@ with tab_cfg:
                 st.success("Advanced config saved")
             except Exception as e:
                 st.error(f"Invalid config: {e}")
+    with st.expander("App version and updates"):
+        try:
+            import updater
+        except ImportError:
+            updater = None
+            st.caption("Update controls need app version 2.0 or later.")
+        if updater is not None:
+            s = updater.status()
+            st.write(f"App {s['app_version']} | code: {s['code_source']} {s['code_version'] or ''} | "
+                     f"{s['repo']}@{s['branch']}")
+            st.caption(f"Last check: {s['last_checked'] or 'never'} | {s['last_result'] or ''} "
+                       f"{('| error: ' + s['last_error']) if s['last_error'] else ''}")
+            u1, u2 = st.columns(2)
+            if u1.button("Check for updates now"):
+                r = updater.check_and_apply()
+                if r["result"] == "applied":
+                    st.success("New code downloaded. Captures use it on the next run. Restart the app to update this screen.")
+                else:
+                    st.info(r.get("message") or r.get("error") or r.get("reason") or r["result"])
+            if u2.button("Roll back to previous code", disabled=not s["rollback_available"]):
+                updater.rollback("manual from UI")
+                st.success("Rolled back. Restart the app to load it.")

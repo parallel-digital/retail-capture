@@ -1,0 +1,4 @@
+{
+  "min_shell_version": "2.0.0",
+  "files": ["common.py", "runtime_control.py", "manifest.py", "page_data.py", "capture.py", "app.py"]
+}

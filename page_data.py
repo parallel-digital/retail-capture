@@ -74,7 +74,10 @@ def _rating_from_text(value):
 def _review_count(value):
     if not value:
         return None
-    match = re.search(r"\(([0-9]+(?:\.[0-9]+)?)([KkMm]?)\)", str(value))
+    text = str(value)
+    match = re.search(r"\b[0-5]\.\d\s*\(([0-9]+(?:\.[0-9]+)?)([KkMm]?)\)", text)
+    if not match:
+        match = re.search(r"\(([0-9]+(?:\.[0-9]+)?)([KkMm]?)\)", text)
     if not match:
         return None
     number = float(match.group(1))
@@ -464,6 +467,13 @@ async def extract_page_data(page, row, captured_at):
         "page_key": _page_key(row),
     }
 
+    url = str(row.get("url") or "").lower()
+    if "amazon" not in str(row.get("retailer") or "").lower() and "amazon." not in url:
+        # Best Buy / Target parsers come next. Until then, keep honest output: HTML + text only.
+        payload["extraction_status"] = "not_supported"
+        payload["body_text_preview"] = (await page.locator("body").inner_text())[:5000]
+        return payload
+    
     if page_type == "search":
         rows = await page.evaluate(SEARCH_JS)
         for item in rows:
