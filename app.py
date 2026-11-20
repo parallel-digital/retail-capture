@@ -23,7 +23,17 @@ URLS = ROOT / "urls.csv"
 CFG = ROOT / "config.yaml"
 TEMPLATE = ("account,url,retailer,page_type,name\n"
             "Account A,https://www.amazon.com/gp/bestsellers/,amazon,bestsellers,amazon-bestsellers\n")
-st.set_page_config(page_title=f"Event Capture - {PROFILE_LABEL}", layout="wide")
+st.set_page_config(page_title=f"Retail Screenshot Capture - {PROFILE_LABEL}", layout="wide")
+st.markdown("""<style>
+:root{--gun:#143642;--aqua:#0F8B8D;--red:#FA140A;--plat:#DCE0D9;--grey:#5A6469}
+html,body,[class*=css]{font-family:Inter,Arial,sans-serif;color:var(--gun)}
+.block-container{padding-top:2rem;max-width:1500px} h1,h2,h3{color:var(--gun)!important}
+.prg-kicker{color:var(--red);font-weight:700;font-size:.78rem;letter-spacing:.12em;text-transform:uppercase}
+.prg-title{color:var(--aqua);font-size:2.65rem;line-height:1.05;font-weight:750;letter-spacing:-.045em}
+.prg-subtitle{color:var(--gun);margin:.45rem 0 1rem;font-size:1rem}.prg-rule{height:4px;width:88px;background:var(--red);border-radius:8px;margin:.9rem 0 1.25rem}
+.stButton>button[kind=primary]{background:var(--red);border-color:var(--red);color:white}[data-testid=stProgress]>div>div>div>div{background-color:var(--aqua)}
+</style>""", unsafe_allow_html=True)
+st.markdown('<div class="prg-kicker">Parallel Retail Group</div><div class="prg-title">Retail Screenshot Capture</div><div class="prg-subtitle">Capture, monitor and organize retail pages across accounts and events.</div><div class="prg-rule"></div>', unsafe_allow_html=True)
 st.caption(f"Profile: **{PROFILE_LABEL}**. Settings, URL list and save folder are separate for each profile.")
 
 
@@ -60,14 +70,30 @@ def open_folder(p):
 
 
 
+def launch_capture(extra_args=None):
+    args = list(extra_args or [])
+    cmd = ([sys.executable, "--capture"] + args if FROZEN else [sys.executable, "-u", str(HERE / "capture.py")] + args)
+    env = {**os.environ, "PYTHONUNBUFFERED":"1", "PYTHONIOENCODING":"utf-8"}
+    runtime.RUNTIME.mkdir(parents=True, exist_ok=True)
+    log_handle = open(runtime.RUNTIME / "capture.log", "a", encoding="utf-8")
+    runtime.update_state(status="starting", message="Launching capture worker...")
+    try:
+        proc = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=log_handle, stderr=subprocess.STDOUT, creationflags=getattr(subprocess,"CREATE_NEW_CONSOLE",0))
+        runtime.update_state(status="starting", message=f"Capture worker launched (PID {proc.pid})", worker_pid=proc.pid)
+        return proc.pid
+    except Exception as exc:
+        runtime.update_state(status="failed", message=f"Could not launch capture worker: {exc}", error=repr(exc))
+        raise
+
+
 def render_live_status():
     state = runtime.read_state()
     status = state.get("status", "idle")
-    active = status in {"running", "paused", "needs_attention", "stopping"}
+    active = status in {"starting", "running", "paused", "needs_attention", "stopping"}
     st.subheader("Live capture status")
     labels = {"running":"RUNNING", "paused":"PAUSED", "needs_attention":"AMAZON NEEDS ATTENTION",
               "stopping":"STOPPING", "complete":"COMPLETE", "partial":"PARTIAL", "failed":"FAILED",
-              "stopped":"STOPPED", "skipped_busy":"SKIPPED - ALREADY RUNNING", "idle":"IDLE"}
+              "stopped":"STOPPED", "starting":"STARTING", "skipped_busy":"SKIPPED - ALREADY RUNNING", "idle":"IDLE"}
     st.markdown(f"### {labels.get(status, status.upper())}")
     total=int(state.get("total") or 0); completed=int(state.get("completed") or 0)
     if total:
@@ -82,15 +108,18 @@ def render_live_status():
         st.caption("A Windows desktop alert also appears when verification is detected, even if this browser tab is hidden or closed.")
         if state.get("challenge_screenshot") and Path(state["challenge_screenshot"]).exists():
             st.caption(f"Challenge evidence saved: {state['challenge_screenshot']}")
+    resumable = status in {"stopped", "failed"} and runtime.read_checkpoint() is not None
     b1,b2,b3,b4=st.columns(4)
     if b1.button("Pause after current page", disabled=status != "running"):
         runtime.send_command("pause"); st.rerun()
-    if b2.button("Resume capture", type="primary", disabled=status not in {"paused","needs_attention"}):
-        runtime.send_command("resume"); st.rerun()
+    resume_label = "Resume stopped capture" if resumable else "Resume capture"
+    if b2.button(resume_label, type="primary", disabled=(status not in {"paused","needs_attention"} and not resumable)):
+        if resumable: launch_capture([])
+        else: runtime.send_command("resume")
+        st.rerun()
     if b3.button("Stop safely", disabled=not active):
         runtime.send_command("stop"); st.rerun()
-    if b4.button("Refresh status"):
-        st.rerun()
+    if b4.button("Refresh status"): st.rerun()
     st.caption(f"Last updated: {state.get('updated_at') or 'No run yet'}")
 
 tab_run, tab_gal, tab_crop, tab_cfg = st.tabs(["Run", "Gallery", "Manual crop", "Settings"])
@@ -149,16 +178,12 @@ with tab_run:
 
     if run_clicked:
         norm.to_csv(URLS, index=False)
-        base = ([sys.executable, "--capture"] if FROZEN
-                else [sys.executable, "-u", str(HERE / "capture.py")])
-        cmd = base + (["--account", acct] if acct != "all" else []) + (["--only", ret] if ret != "all" else [])
-        env = {**os.environ, "PYTHONUNBUFFERED": "1", "PYTHONIOENCODING": "utf-8"}
-        log_path = runtime.RUNTIME / "capture.log"
-        runtime.RUNTIME.mkdir(parents=True, exist_ok=True)
-        log_handle = open(log_path, "a", encoding="utf-8")
-        subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=log_handle, stderr=subprocess.STDOUT,
-                         creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
-        st.success("Capture started. Progress appears above; the browser tab can be closed without stopping the worker.")
+        args_new = ["--fresh"] + (["--account", acct] if acct != "all" else []) + (["--only", ret] if ret != "all" else [])
+        try:
+            pid = launch_capture(args_new)
+            st.success(f"Capture worker launched (PID {pid}). Progress appears above.")
+        except Exception as exc:
+            st.error(f"Capture could not start: {exc}")
         st.rerun()
 
 def pick_run(prefix):
