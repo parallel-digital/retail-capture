@@ -1,0 +1,112 @@
+# Where runs are saved. Point this at a synced OneDrive/SharePoint folder if you like.
+output_dir: output
+
+# Event name written into manifests. Blank = the name of the save folder above (e.g. "T12 2026").
+event: ""
+# Optional capture phase: baseline, pre_event, live_event, post_event. Blank = null.
+event_phase: ""
+
+# Used to turn saved files into SharePoint links (file_url). Blank = auto-detected from the OneDrive sync client.
+# Only set these if links are missing: local_root = the synced folder on this PC, url_base = its SharePoint URL.
+sharepoint:
+  local_root: ""
+  url_base: ""
+
+
+# Save visual evidence, raw HTML, and analysis-ready JSON.
+collection:
+  save_html: true
+  extract_structured_data: true
+# Legacy setting retained for backward compatibility.
+debug_html: false
+
+browser:
+  # cdp        = launch the real Edge/Chrome and drive it. Looks like a normal shopper, so Amazon serves ads.
+  # playwright = browser launched by automation (Amazon often withholds sponsored placements from it).
+  mode: cdp
+  channel: msedge          # Edge ships with Windows; "chrome" also works if installed
+  profile_dir: edge_profile   # persistent profile: keeps ZIP code and cookies (run the one-time setup after changing)
+  headless: false          # false = a browser window appears during capture (recommended for ads)
+  debug_port: 9222
+  viewport: {width: 1440, height: 900}
+  locale: en-US
+
+timing:
+  settle_ms: 1300          # wait after load
+  scroll_pause_ms: 150     # pause between scroll steps (triggers lazy loading)
+  between_urls_sec: [2, 5] # random pause between URLs. Slower = far fewer Amazon human checks
+  retries: 1
+
+# What to do when Amazon shows an "I am human" check
+blocks:
+  wait_for_human_sec: 180   # visible browser: wait this long for you to tick the box, then continue
+  cooldown_sec: 120         # pause after a block before the next URL
+  retry_blocked: true       # retry blocked URLs once at the end of the run
+
+# Click these if present (cookie banners, location popups)
+dismiss_selectors:
+  - "#sp-cc-accept"
+  - "input[data-action-type='DISMISS']"
+  - "button:has-text('Accept')"
+  - "button[aria-label='Close']"
+
+# Auto-clips per page_type. Selectors WILL need tuning to your pages; use browser DevTools.
+# max = how many matching elements to clip (e.g. first 4 bestseller tiles).
+clips:
+  bestsellers:
+    - {name: top-items, selector: "#gridItemRoot", max: 5}
+  search:
+    - {name: top-results, selector: "[data-component-type='s-search-result']", max: 4}
+    # Sponsored product cards (any result card containing "Sponsored")
+    - {name: sponsored-products, selector: "[data-component-type='s-search-result']", has_text: "Sponsored", max: 6}
+    # Sponsored Brands: banner with product carousel (e.g. "Class D car audio amplifiers | Shop Brand")
+    - {name: sponsored-brand-banner, selector: ".s-widget-container:has(a[aria-label^='Sponsored ad from'])", max: 2}
+    # Sponsored Brands video (single and multi product)
+    - {name: sponsored-video, selector: ".s-widget-container:has([data-component-type^='sbv-video'])", max: 3}
+    # Sponsored carousels inside results ("Customers frequently viewed", "Seen on social media" ...)
+    - {name: sponsored-carousel, selector: ".s-widget-container:has([data-component-type='s-searchgrid-carousel'])", has_text: "Sponsored", max: 3}
+    # "Brands related to your search" footer
+    - {name: sponsored-brand-footer, selector: ".AdHolder:has([cel_widget_id*='brand-footer'])", max: 1}
+    # Display ads: left skyscrapers and bottom banner
+    - {name: sponsored-display, selector: ".AdHolder:has([cel_widget_id^='loom-desktop-skyscraper']), .AdHolder:has([cel_widget_id^='loom-desktop-footer-slot'])", max: 4}
+  deal_page:
+    - name: top-deals
+      selector: "[data-testid='discount-asin-grid'] [data-testid='product-card']"
+      max: 10
+      wait_ms: 500
+      save_html_on_miss: true
+  pdp_brand_story:
+    # Amazon product page (/dp/ASIN). Each module is found by its visible heading, then its whole section is clipped.
+    - {name: from-the-brand, heading: "From the brand", wait_ms: 1500, save_html_on_miss: true}
+    - {name: from-the-manufacturer, heading: "From the manufacturer", wait_ms: 2000, save_html_on_miss: true}
+  brand_store:
+    - {name: hero, selector: "[class*='hero'], [id*='hero']", max: 1}
+
+# Adaptive performance. Amazon remains conservative; Best Buy and Target use fast readiness-based loading.
+performance:
+  mode: standard
+  local_staging: true
+  defaults:
+    clip_limit: 5
+  retailers:
+    amazon:
+      settle_ms: 1600
+      step_pause_ms: 250
+      max_sweep_seconds: 28
+      image_wait_seconds: 7
+      minimum_loaded_ratio: 0.97
+      max_targeted_clusters: 6
+    best_buy:
+      settle_ms: 1000
+      step_pause_ms: 125
+      max_sweep_seconds: 15
+      image_wait_seconds: 6
+      minimum_loaded_ratio: 0.97
+      max_targeted_clusters: 6
+    target:
+      settle_ms: 900
+      step_pause_ms: 100
+      max_sweep_seconds: 10
+      image_wait_seconds: 4
+      minimum_loaded_ratio: 0.97
+      max_targeted_clusters: 4
