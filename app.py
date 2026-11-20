@@ -14,6 +14,7 @@ except Exception:
 
 from common import COLS, DATA as ROOT, FROZEN, normalize_urls, read_urls
 import runtime_control as runtime
+import manifest as manifest_tools
 
 PROFILE = os.environ.get("RETAIL_CAPTURE_PROFILE", "amazon")
 PROFILE_LABEL = {"amazon": "Amazon", "bby-target": "Best Buy / Target"}.get(PROFILE, PROFILE)
@@ -122,7 +123,7 @@ def render_live_status():
     if b4.button("Refresh status"): st.rerun()
     st.caption(f"Last updated: {state.get('updated_at') or 'No run yet'}")
 
-tab_run, tab_gal, tab_crop, tab_cfg = st.tabs(["Run", "Gallery", "Manual crop", "Settings"])
+tab_run, tab_gal, tab_crop, tab_maint, tab_cfg = st.tabs(["Run", "Gallery", "Manual crop", "Maintenance", "Settings"])
 
 with tab_run:
     if hasattr(st, "fragment"):
@@ -243,6 +244,48 @@ with tab_crop:
             dest.parent.mkdir(exist_ok=True)
             crop.save(dest)
             st.success(f"Saved {dest.name}")
+
+with tab_maint:
+    st.subheader("Manifest cleanup")
+    st.write("Delete unwanted run folders, page folders, or clip PNGs first. Then reconcile the manifests so RIP only indexes files that still exist.")
+    st.warning("This operation changes manifest JSON only. It never deletes screenshots, HTML, page data, clips, or capture folders.")
+    base = out_root()
+    st.caption(f"Event folder: {base}")
+    if "manifest_preview" not in st.session_state:
+        st.session_state.manifest_preview = None
+    if st.button("Preview manifest cleanup"):
+        try:
+            st.session_state.manifest_preview = manifest_tools.rebuild_manifests(load_cfg(), base, dry_run=True)
+        except Exception as exc:
+            st.error(f"Could not preview manifest cleanup: {exc}")
+    preview = st.session_state.manifest_preview
+    if preview:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Runs scanned", preview["runs_scanned"])
+        c2.metric("Runs to update", preview["runs_updated"])
+        c3.metric("Deleted run references", preview["deleted_run_references"])
+        c4.metric("Legacy runs skipped", preview["legacy_runs_skipped"])
+        c5, c6, c7, c8 = st.columns(4)
+        c5.metric("Pages retained", preview["pages_retained"])
+        c6.metric("Pages removed", preview["pages_removed"])
+        c7.metric("Clips retained", preview["clips_retained"])
+        c8.metric("Clips removed", preview["clips_removed"])
+        if preview["pages_added"] or preview["clips_added"]:
+            st.info(f"Items found on disk but missing from manifests: {preview['pages_added']} page folder(s), {preview['clips_added']} clip(s). These will be added.")
+        for warning in preview.get("warnings", []):
+            st.warning(warning)
+        changes = (preview["runs_updated"] + preview["runs_removed"] + preview["deleted_run_references"] + preview["pages_added"] + preview["clips_added"])
+        confirm = st.checkbox("I reviewed the preview and want to rebuild the manifests", disabled=changes == 0)
+        if st.button("Rebuild manifests", type="primary", disabled=(changes == 0 or not confirm)):
+            try:
+                result = manifest_tools.rebuild_manifests(load_cfg(), base, dry_run=False)
+                st.session_state.manifest_preview = None
+                st.success(f"Manifest rebuild complete. Updated {result['runs_updated']} run(s), removed {result['pages_removed']} stale page reference(s), and removed {result['clips_removed']} stale clip reference(s).")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Manifest rebuild failed: {exc}")
+        if changes == 0:
+            st.success("The manifests already match the files on disk.")
 
 with tab_cfg:
     cfg = load_cfg()

@@ -314,3 +314,45 @@ class TestBackfill(Base):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+class TestManifestRebuild(Base):
+    def test_preview_and_rebuild_deleted_page_and_clip(self):
+        self.publish("Pioneer", "amazon", T1)
+        run = self.base / "pioneer" / "amazon" / "2026-11-13" / "1257"
+        import shutil
+        shutil.rmtree(run / "blocked-page")
+        (run / "amplifiers" / "clips" / "top-results-1.png").unlink()
+        before = (run / "manifest.json").read_bytes()
+        preview = M.rebuild_manifests(self.cfg, self.base, dry_run=True)
+        self.assertEqual(preview["pages_removed"], 1)
+        self.assertEqual(preview["clips_removed"], 1)
+        self.assertEqual((run / "manifest.json").read_bytes(), before)
+        M.rebuild_manifests(self.cfg, self.base)
+        updated = json.loads((run / "manifest.json").read_text())
+        self.assertEqual(updated["page_count"], 3)
+        self.assertNotIn("blocked-page", {p["label"] for p in updated["pages"]})
+        amp = next(p for p in updated["pages"] if p["label"] == "amplifiers")
+        self.assertEqual(amp["page_type"], "search")
+        self.assertNotIn("top-results-1.png", {c["file"] for c in amp["clips"]})
+
+    def test_orphan_clip_is_added(self):
+        self.publish("Pioneer", "amazon", T1)
+        run = self.base / "pioneer" / "amazon" / "2026-11-13" / "1257"
+        orphan = run / "amplifiers" / "clips" / "manual-extra.png"
+        orphan.write_bytes(PNG)
+        preview = M.rebuild_manifests(self.cfg, self.base, dry_run=True)
+        self.assertEqual(preview["clips_added"], 1)
+        M.rebuild_manifests(self.cfg, self.base)
+        page = next(p for p in json.loads((run / "manifest.json").read_text())["pages"] if p["label"] == "amplifiers")
+        clip = next(c for c in page["clips"] if c["file"] == "manual-extra.png")
+        self.assertEqual(clip["source"], "filesystem-rebuild")
+
+    def test_deleted_run_disappears_from_event_index(self):
+        import shutil
+        self.publish("Pioneer", "amazon", T1)
+        self.publish("Pioneer", "amazon", T2)
+        shutil.rmtree(self.base / "pioneer" / "amazon" / "2026-11-13" / "1257")
+        preview = M.rebuild_manifests(self.cfg, self.base, dry_run=True)
+        self.assertEqual(preview["deleted_run_references"], 1)
+        M.rebuild_manifests(self.cfg, self.base)
+        self.assertEqual(len(self.event()["runs"]), 1)
