@@ -417,26 +417,67 @@ async def capture_one(ctx, row, cfg, run_dir):
                 if rule.get("fallback_has_text"):
                     loc = loc.filter(has_text=rule["fallback_has_text"])
                 found = await loc.count()
-            count = min(found, rule.get("max", 1))
+            max_clips = int(rule.get("max", 1))
             saved = 0
             missed = found == 0 and rule.get("save_html_on_miss")
             if missed:      # keep the page source so the selector can be fixed
                 (folder / "page.html").write_text(await page.content(), encoding="utf-8")
-            for i in range(count):
+
+            # A deal-page carousel can use the same product-card markup as the real
+            # results grid. Inspect every match until max_clips eligible grid cards
+            # are saved, instead of clipping only the first max_clips DOM matches.
+            for i in range(found):
+                if saved >= max_clips:
+                    break
                 el = loc.nth(i)
                 try:
+                    if row["page_type"] == "deal_page" and is_amazon(row):
+                        eligible = await el.evaluate("""node => {
+                          const r = node.getBoundingClientRect();
+                          const s = getComputedStyle(node);
+                          if (r.width < 40 || r.height < 40 ||
+                              s.display === 'none' || s.visibility === 'hidden') return false;
+
+                          // Amazon places this anchor at the start of the filterable
+                          // deal grid, below featured banner and Top Deals modules.
+                          const anchor = document.querySelector(
+                            "#dealsGridLinkAnchor, [data-testid='virtuoso-item-list']");
+                          const top = r.top + window.scrollY;
+                          const gridTop = anchor
+                            ? anchor.getBoundingClientRect().top + window.scrollY
+                            : null;
+                          if (gridTop !== null && top < gridTop - 5) return false;
+
+                          // Secondary protection against horizontal merchandising
+                          // strips that Amazon may move inside a broad grid wrapper.
+                          if (node.closest(
+                            "[class*='carousel'], [data-testid*='carousel'], " +
+                            "[role='list'][aria-roledescription='carousel'], .a-carousel")) {
+                            return false;
+                          }
+                          return true;
+                        }""")
+                        if not eligible:
+                            continue
+
                     await el.scroll_into_view_if_needed(timeout=3000)
-                    await page.wait_for_timeout(int(rule.get("wait_ms", 0)))   # let lazy images finish
+                    await page.wait_for_timeout(int(rule.get("wait_ms", 0)))
                     box = await el.bounding_box()
                     if not box or box["width"] < 40 or box["height"] < 40:
                         continue
-                    fn = f"{rule['name']}-{i + 1}.png"
+                    clip_number = saved + 1
+                    fn = f"{rule['name']}-{clip_number}.png"
                     await el.screenshot(path=str(folder / "clips" / fn))
-                    result["clips"].append({"file": fn, "selector": rule["selector"], "index": i})
+                    result["clips"].append({
+                        "file": fn,
+                        "selector": rule["selector"],
+                        "index": i,
+                        "grid_position": clip_number,
+                    })
                     saved += 1
                 except Exception:
                     continue
-            report[rule["name"]] = (f"{found} found, {saved} clipped"
+            report[rule["name"]] = (f"{found} found, {saved} grid cards clipped"
                                     + (" - saved page.html next to full.png, send it for a selector fix" if missed else ""))
         result["clip_report"] = report
     except Blocked:
