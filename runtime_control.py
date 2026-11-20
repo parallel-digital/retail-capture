@@ -22,6 +22,29 @@ def read_state():
     except Exception: return {"status":"idle", "updated_at":None}
 def update_state(**changes):
     state = read_state(); state.update(changes); state["updated_at"] = _now(); _atomic(STATE, state); return state
+def read_checkpoint():
+    """Return the interrupted-run checkpoint, or None if no usable checkpoint exists."""
+    try:
+        payload = json.loads(CHECKPOINT.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else None
+    except Exception:
+        return None
+
+
+def write_checkpoint(payload):
+    """Persist restart state atomically."""
+    payload = dict(payload)
+    payload["updated_at"] = _now()
+    _atomic(CHECKPOINT, payload)
+    return payload
+
+
+def clear_checkpoint():
+    """Remove the restart checkpoint after a completed run or explicit fresh start."""
+    try:
+        CHECKPOINT.unlink(missing_ok=True)
+    except Exception:
+        pass
 def send_command(command): _atomic(COMMAND, {"command":command, "created_at":_now()})
 def take_command():
     try:
