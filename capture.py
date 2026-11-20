@@ -7,7 +7,7 @@
 
 Output: <output_dir>/<account>/<retailer>/<YYYY-MM-DD>/<HHMM>/<name>/full.png + clips/
 """
-import argparse, asyncio, atexit, hashlib, io, json, os, random, subprocess, urllib.request
+import argparse, asyncio, atexit, gc, hashlib, io, json, os, random, shutil, subprocess, time, urllib.request
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -24,18 +24,124 @@ def is_amazon(row):
     return "amazon" in str(row.get("retailer") or "").lower() or "amazon." in str(row.get("url") or "").lower()
 
 
+def _retailer_key(row):
+    text = f"{row.get('retailer','')} {row.get('url','')}".lower()
+    if "best buy" in text or "bestbuy." in text: return "best_buy"
+    if "target" in text or "target." in text: return "target"
+    if "amazon" in text or "amazon." in text: return "amazon"
+    return "other"
+
+
+def performance_settings(cfg, row):
+    """Merge safe defaults, named mode, and retailer overrides."""
+    retailer = _retailer_key(row)
+    mode = str((cfg.get("performance") or {}).get("mode") or ("balanced" if retailer == "amazon" else "fast")).lower()
+    presets = {
+        "evidence": {"settle_ms":1800,"step_pause_ms":225,"max_sweep_seconds":30,"image_wait_seconds":8,"minimum_loaded_ratio":0.98,"max_targeted_clusters":8,"clip_limit":10},
+        "standard": {"settle_ms":1300,"step_pause_ms":150,"max_sweep_seconds":20,"image_wait_seconds":6,"minimum_loaded_ratio":0.97,"max_targeted_clusters":6,"clip_limit":5},
+        "balanced": {"settle_ms":1600,"step_pause_ms":250,"max_sweep_seconds":28,"image_wait_seconds":7,"minimum_loaded_ratio":0.97,"max_targeted_clusters":6,"clip_limit":5},
+        "fast": {"settle_ms":900,"step_pause_ms":110,"max_sweep_seconds":15,"image_wait_seconds":5,"minimum_loaded_ratio":0.97,"max_targeted_clusters":5,"clip_limit":5},
+    }
+    out = dict(presets.get(mode, presets["standard"]))
+    perf = cfg.get("performance") or {}
+    out.update(perf.get("defaults") or {})
+    out.update((perf.get("retailers") or {}).get(retailer) or {})
+    out["mode"] = mode
+    out["retailer"] = retailer
+    return out
+
+
+async def dismiss_surveys(page):
+    """Close or hide only fixed survey/feedback intercepts; never remove normal page modules."""
+    removed = 0
+    selectors = [
+        "[aria-label*='survey' i] button", "[id*='survey' i] button", "[class*='survey' i] button",
+        "[aria-label*='feedback' i] button", "[id*='feedback' i] button", "[class*='feedback' i] button",
+        "button[aria-label*='close' i]", "button[title*='close' i]",
+    ]
+    for selector in selectors:
+        try:
+            loc = page.locator(selector)
+            for i in range(min(await loc.count(), 8)):
+                el = loc.nth(i)
+                if await el.is_visible(timeout=100):
+                    txt = ((await el.get_attribute("aria-label")) or "") + " " + ((await el.get_attribute("title")) or "")
+                    parent_txt = ""
+                    try: parent_txt = (await el.locator("xpath=ancestor::*[position() <= 4]").last.inner_text(timeout=150))[:300]
+                    except Exception: pass
+                    if re.search(r"survey|feedback|intercept|close|dismiss", txt + " " + parent_txt, re.I):
+                        await el.click(timeout=500); removed += 1
+        except Exception:
+            pass
+    try:
+        removed += int(await page.evaluate("""() => {
+          let n=0, terms=/survey|feedback|intercept|qualtrics|medallia|assistive/i;
+          for (const el of document.querySelectorAll("[id*='survey' i],[class*='survey' i],[id*='feedback' i],[class*='feedback' i],[aria-label*='survey' i],iframe[title*='survey' i],iframe[src*='qualtrics' i]")) {
+            const st=getComputedStyle(el), r=el.getBoundingClientRect();
+            const sig=`${el.id} ${el.className} ${el.getAttribute('aria-label')||''} ${el.getAttribute('title')||''}`;
+            if (terms.test(sig) && (st.position==='fixed'||st.position==='sticky'||r.right>innerWidth-180||r.bottom>innerHeight-180)) {
+              el.style.setProperty('display','none','important'); n++;
+            }
+          }
+          return n;
+        }"""))
+    except Exception:
+        pass
+    return removed
+
+
+async def image_readiness(page):
+    return await page.evaluate("""() => {
+      const imgs=[...document.images].filter(img => {
+        const r=img.getBoundingClientRect(), st=getComputedStyle(img);
+        return r.width>=40 && r.height>=40 && st.display!=='none' && st.visibility!=='hidden';
+      });
+      const loaded=imgs.filter(i=>i.complete && i.naturalWidth>1).length;
+      return {total_meaningful:imgs.length,loaded,unresolved:imgs.length-loaded,loaded_ratio:imgs.length?loaded/imgs.length:1};
+    }""")
+
+
+async def adaptive_hydrate(page, settings):
+    """Fast viewport sweep, readiness-based wait, then targeted retry for unresolved image clusters."""
+    started=time.perf_counter(); last_h=0; stable=0; steps=0
+    max_seconds=float(settings["max_sweep_seconds"]); pause=int(settings["step_pause_ms"])
+    while time.perf_counter()-started < max_seconds:
+        state=await page.evaluate("""() => ({y:scrollY,h:document.documentElement.scrollHeight,v:innerHeight,bottom:scrollY+innerHeight>=document.documentElement.scrollHeight-5})""")
+        h=int(state["h"]); stable = stable+1 if h==last_h else 0; last_h=h
+        if state["bottom"] and stable>=2: break
+        await page.evaluate("v=>window.scrollBy(0,Math.max(320,innerHeight*v))", 0.80)
+        await page.wait_for_timeout(pause); steps+=1
+    # Fast upward pass helps virtualized and direction-sensitive lazy loaders.
+    await page.evaluate("window.scrollTo(0,document.documentElement.scrollHeight)")
+    while True:
+        y=await page.evaluate("window.scrollY")
+        if y<=0: break
+        await page.evaluate("v=>window.scrollBy(0,-Math.max(320,innerHeight*v))",0.9)
+        await page.wait_for_timeout(max(60,pause//2))
+        if time.perf_counter()-started > max_seconds+3: break
+    # Readiness wait stops on ratio, no improvement, or hard budget.
+    wait_started=time.perf_counter(); best=-1; unchanged=0
+    while time.perf_counter()-wait_started < float(settings["image_wait_seconds"]):
+        ready=await image_readiness(page)
+        if ready["loaded_ratio"] >= float(settings["minimum_loaded_ratio"]): break
+        if ready["loaded"]<=best: unchanged+=1
+        else: best=ready["loaded"]; unchanged=0
+        if unchanged>=3: break
+        await page.wait_for_timeout(250)
+    # Target only unresolved meaningful images, grouped by vertical area.
+    clusters=await page.evaluate("""() => [...document.images].filter(i=>{const r=i.getBoundingClientRect(),s=getComputedStyle(i);return r.width>=40&&r.height>=40&&s.display!=='none'&&s.visibility!=='hidden'&&(!i.complete||i.naturalWidth<=1)}).map(i=>Math.max(0,Math.round((i.getBoundingClientRect().top+scrollY)/innerHeight)*innerHeight)).filter((v,i,a)=>a.indexOf(v)===i).slice(0,20)""")
+    targeted_started=time.perf_counter()
+    for y in clusters[:int(settings["max_targeted_clusters"])]:
+        await page.evaluate("y=>window.scrollTo(0,y)",y); await page.wait_for_timeout(450)
+    await page.evaluate("window.scrollTo(0,0)"); await page.wait_for_timeout(250)
+    ready=await image_readiness(page)
+    ready.update({"sweep_steps":steps,"sweep_seconds":round(wait_started-started,2),"readiness_wait_seconds":round(targeted_started-wait_started,2),"targeted_pass_seconds":round(time.perf_counter()-targeted_started,2)})
+    return ready
+
+
 async def autoscroll(page, pause):
-    """Scroll to the bottom in steps so lazy-loaded content renders, then return to top."""
-    for _ in range(80):
-        await page.mouse.wheel(0, 800)
-        await page.wait_for_timeout(pause)
-        at_bottom = await page.evaluate(
-            "window.scrollY + window.innerHeight >= document.documentElement.scrollHeight - 5")
-        if at_bottom:
-            break
-    await page.wait_for_timeout(800)
-    await page.evaluate("window.scrollTo(0, 0)")
-    await page.wait_for_timeout(500)
+    """Backward-compatible wrapper used by older profiles."""
+    return await adaptive_hydrate(page, {"step_pause_ms":pause,"max_sweep_seconds":20,"image_wait_seconds":5,"minimum_loaded_ratio":0.97,"max_targeted_clusters":5})
 
 
 async def prepare_deal_page(page, pause):
@@ -309,26 +415,40 @@ async def ensure_clear(page, row, cfg, folder):
 
 async def capture_one(ctx, row, cfg, run_dir):
     t = cfg["timing"]
-    folder = run_dir / slug(row["name"])
+    target_folder = run_dir / slug(row["name"])
+    perf = performance_settings(cfg, row)
+    staging = bool((cfg.get("performance") or {}).get("local_staging", False))
+    folder = (ROOT / "runtime" / "staging" / hashlib.sha1(str(target_folder).encode()).hexdigest()[:16]) if staging else target_folder
+    if folder.exists() and staging: shutil.rmtree(folder, ignore_errors=True)
     (folder / "clips").mkdir(parents=True, exist_ok=True)
     page = await ctx.new_page()
-    result = {**row, "status": "ok", "clips": [], "captured_at": datetime.now().astimezone().isoformat(timespec="seconds")}
+    result = {**row, "status": "ok", "clips": [], "captured_at": datetime.now().astimezone().isoformat(timespec="seconds"), "performance_mode": perf["mode"]}
+    page_started = time.perf_counter()
     try:
         await page.goto(row["url"], wait_until="domcontentloaded", timeout=60000)
-        await page.wait_for_timeout(t["settle_ms"])
+        await page.wait_for_timeout(int(perf["settle_ms"]))
         await ensure_clear(page, row, cfg, folder)
         title = (await page.title()) or ""
         result["final_url"] = page.url
         await dismiss(page, cfg.get("dismiss_selectors", []))
+        survey_removed = await dismiss_surveys(page)
+        hydrate_started = time.perf_counter()
         if row["page_type"] == "deal_page" and is_amazon(row):
             await page.keyboard.press("Escape")
             await page.mouse.move(500, 350)
-
-            await prepare_deal_page(page, t["scroll_pause_ms"])
+            await prepare_deal_page(page, min(t["scroll_pause_ms"], int(perf["step_pause_ms"])))
+            image_stats = await image_readiness(page)
         else:
-            await autoscroll(page, t["scroll_pause_ms"])
-        await ensure_clear(page, row, cfg, folder)      # a check can also appear mid-page
+            image_stats = await adaptive_hydrate(page, perf)
+        result["image_readiness"] = image_stats
+        result["survey_overlay_removed"] = survey_removed > 0
+        result["hydrate_seconds"] = round(time.perf_counter()-hydrate_started,2)
+        await ensure_clear(page, row, cfg, folder)
+        survey_removed += await dismiss_surveys(page)  # final pass immediately before evidence capture
+        result["survey_overlay_removed"] = survey_removed > 0
+        screenshot_started=time.perf_counter()
         await screenshot_page(page, folder / "full.png", row["page_type"] if is_amazon(row) else "other")
+        result["screenshot_seconds"] = round(time.perf_counter()-screenshot_started,2)
         result["title"] = title
 
         # Save the rendered DOM as a durable source artifact. Keep debug_html as
@@ -417,7 +537,7 @@ async def capture_one(ctx, row, cfg, run_dir):
                 if rule.get("fallback_has_text"):
                     loc = loc.filter(has_text=rule["fallback_has_text"])
                 found = await loc.count()
-            max_clips = int(rule.get("max", 1))
+            max_clips = min(int(rule.get("max", 1)), int(perf.get("clip_limit", 5)))
             saved = 0
             missed = found == 0 and rule.get("save_html_on_miss")
             if missed:      # keep the page source so the selector can be fixed
@@ -485,7 +605,13 @@ async def capture_one(ctx, row, cfg, run_dir):
     except Exception as e:
         result["status"] = f"error: {e}"
     finally:
+        result["total_seconds"] = round(time.perf_counter()-page_started,2)
         await page.close()
+        if staging and folder.exists():
+            target_folder.parent.mkdir(parents=True, exist_ok=True)
+            if target_folder.exists(): shutil.rmtree(target_folder, ignore_errors=True)
+            shutil.move(str(folder), str(target_folder))
+        gc.collect()
     return result
 
 

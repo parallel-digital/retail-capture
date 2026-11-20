@@ -33,9 +33,9 @@ browser:
   locale: en-US
 
 timing:
-  settle_ms: 2500          # wait after load
-  scroll_pause_ms: 450     # pause between scroll steps (triggers lazy loading)
-  between_urls_sec: [20, 45] # random pause between URLs. Slower = far fewer Amazon human checks
+  settle_ms: 1600          # wait after load
+  scroll_pause_ms: 250     # pause between scroll steps (triggers lazy loading)
+  between_urls_sec: [12, 25] # random pause between URLs. Slower = far fewer Amazon human checks
   retries: 1
 
 # What to do when Amazon shows an "I am human" check
@@ -100,3 +100,39 @@ retailer_clips:
       - {name: product-card, selector: "[data-test='product-card'], [data-testid='product-card'], div[data-test='@web/site-top-of-funnel/ProductCardWrapper']", max: 10, wait_ms: 350, save_html_on_miss: true}
     deal_page:
       - {name: product-card, selector: "[data-test='product-card'], [data-testid='product-card'], div[data-test='@web/site-top-of-funnel/ProductCardWrapper']", max: 10, wait_ms: 350, save_html_on_miss: true}
+
+# Adaptive performance. Amazon remains conservative; Best Buy and Target use fast readiness-based loading.
+performance:
+  mode: standard
+  local_staging: true
+  defaults:
+    clip_limit: 5
+  retailers:
+    amazon:
+      settle_ms: 1600
+      step_pause_ms: 250
+      max_sweep_seconds: 28
+      image_wait_seconds: 7
+      minimum_loaded_ratio: 0.97
+      max_targeted_clusters: 6
+    best_buy:
+      settle_ms: 1000
+      step_pause_ms: 125
+      max_sweep_seconds: 15
+      image_wait_seconds: 6
+      minimum_loaded_ratio: 0.97
+      max_targeted_clusters: 6
+    target:
+      settle_ms: 900
+      step_pause_ms: 100
+      max_sweep_seconds: 10
+      image_wait_seconds: 4
+      minimum_loaded_ratio: 0.97
+      max_targeted_clusters: 4
+
+# Recommended Amazon timing override:
+# timing:
+#   settle_ms: 1600
+#   scroll_pause_ms: 250
+#   between_urls_sec: [12, 25]
+#   retries: 1
