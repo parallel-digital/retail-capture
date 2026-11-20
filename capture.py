@@ -7,7 +7,7 @@
 
 Output: <output_dir>/<account>/<retailer>/<YYYY-MM-DD>/<HHMM>/<name>/full.png + clips/
 """
-import argparse, asyncio, atexit, io, json, os, random, subprocess, urllib.request
+import argparse, asyncio, atexit, hashlib, io, json, os, random, subprocess, urllib.request
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -520,140 +520,84 @@ async def open_browser(p, cfg, setup):
     return ctx, ctx.close
 
 
+def _queue_signature(rows, args, cfg, base):
+    payload = {"rows": [{"key": manifest.build_page_key(r), "name": r.get("name"), "url": r.get("url")} for r in rows],
+               "only": args.only, "account": args.account, "event": args.event or cfg.get("event") or Path(base).name,
+               "output_dir": str(Path(base).resolve())}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+def _complete(result, row, cfg, run_dir):
+    if not result or result.get("status") != "ok": return False
+    folder = run_dir / slug(row["name"])
+    full = folder / "full.png"
+    if not full.exists() or full.stat().st_size == 0: return False
+    collection = cfg.get("collection", {}) or {}
+    if collection.get("save_html", cfg.get("debug_html", False)):
+        f = folder / result.get("html_file", "page.html")
+        if not f.exists() or f.stat().st_size == 0: return False
+    if collection.get("extract_structured_data", False):
+        f = folder / result.get("page_data_file", "page-data.json")
+        if result.get("data_extraction_status") == "failed" or not f.exists() or f.stat().st_size == 0: return False
+    return True
+
 async def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--setup", action="store_true")
-    ap.add_argument("--only", help="filter by retailer")
-    ap.add_argument("--account", help="filter by account")
-    ap.add_argument("--event", help="event name for manifests (default: config `event`, else the save folder's name)")
-    ap.add_argument("--backfill", action="store_true",
-                    help="add the new manifest fields to existing runs and build event-manifest.json, then exit")
-    ap.add_argument("--config", default=str(ROOT / "config.yaml"))
-    ap.add_argument("--urls", default=str(ROOT / "urls.csv"))
-    args = ap.parse_args()
-
+    ap=argparse.ArgumentParser(); ap.add_argument("--setup",action="store_true"); ap.add_argument("--only"); ap.add_argument("--account"); ap.add_argument("--event"); ap.add_argument("--fresh",action="store_true"); ap.add_argument("--backfill",action="store_true"); ap.add_argument("--config",default=str(ROOT/"config.yaml")); ap.add_argument("--urls",default=str(ROOT/"urls.csv")); args=ap.parse_args()
     if not args.setup and not args.backfill:
-        if not runtime.acquire_lock():
-            runtime.update_state(status="skipped_busy", message="Another capture is already running")
-            print("Another capture is already running; exiting.", flush=True)
-            return
+        if not runtime.acquire_lock(): runtime.update_state(status="skipped_busy",message="Another capture is already running"); return
         atexit.register(runtime.release_lock)
-
-    cfg = yaml.safe_load(open(args.config, encoding="utf-8"))
-    if args.backfill:
-        manifest.backfill(cfg, manifest.output_base(cfg, ROOT), event=args.event)
-        return
-
+    cfg=yaml.safe_load(open(args.config,encoding="utf-8"))
+    if args.backfill: manifest.backfill(cfg,manifest.output_base(cfg,ROOT),event=args.event); return
     async with async_playwright() as p:
-        ctx, cleanup = await open_browser(p, cfg, args.setup)
+        ctx,cleanup=await open_browser(p,cfg,args.setup)
         if args.setup:
             if ctx is not None:
-                page = await ctx.new_page()
-                await page.goto("https://www.amazon.com")
-            input("Set your ZIP code, clear any CAPTCHA, and browse Amazon like a normal shopper for a minute. "
-                  "Then press Enter here to save the profile...")
-            await cleanup()
-            return
-
-        df = read_urls(args.urls)
-        if args.only:
-            df = df[df["retailer"].str.lower() == args.only.lower()]
-        if args.account:
-            df = df[df["account"].str.lower() == args.account.lower()]
-
-        base = Path(os.path.expandvars(os.path.expanduser(str(cfg["output_dir"]))))
-        if not base.is_absolute():
-            base = ROOT / base
-        now = datetime.now().astimezone()
-        day, hhmm = now.strftime("%Y-%m-%d"), now.strftime("%H%M")
-
-        blk = cfg.get("blocks", {})
-        cool = int(blk.get("cooldown_sec", 120))
-        lo, hi = cfg["timing"]["between_urls_sec"]
-
-        def run_dir_for(row):
-            return base / slug(row["account"]) / slug(row["retailer"]) / day / hhmm
-
-        def report(r):
-            print(f"    -> {r['status']} ({len(r['clips'])} clips)", flush=True)
-            for k, v in r.get("clip_report", {}).items():
-                print(f"       {k}: {v}", flush=True)
-
-        results = []
-        rows = df.to_dict("records")
-        runtime.update_state(
-            status="running", run_id=f"{day}_{hhmm}", event=args.event or cfg.get("event") or base.name,
-            event_phase=cfg.get("event_phase"), started_at=now.isoformat(timespec="seconds"),
-            total=len(rows), completed=0, ok=0, failed=0, blocked=0,
-            current_account=None, current_page=None, next_index=1,
-            message="Capture started", output_dir=str(base), pid=os.getpid()
-        )
-        stopped = False
+                page=await ctx.new_page(); await page.goto("https://www.amazon.com")
+            input("Set your ZIP code, clear any CAPTCHA, and browse Amazon like a normal shopper for a minute. Then press Enter here..."); await cleanup(); return
+        df=read_urls(args.urls)
+        if args.only: df=df[df["retailer"].str.lower()==args.only.lower()]
+        if args.account: df=df[df["account"].str.lower()==args.account.lower()]
+        rows=df.to_dict("records"); base=Path(os.path.expandvars(os.path.expanduser(str(cfg["output_dir"])))); base=base if base.is_absolute() else ROOT/base
+        sig=_queue_signature(rows,args,cfg,base); cp=None if args.fresh else runtime.read_checkpoint(); resume=bool(cp and cp.get("queue_signature")==sig and cp.get("status") in {"running","paused","needs_attention","stopping","stopped","failed"})
+        if args.fresh: runtime.clear_checkpoint()
+        if resume:
+            now=datetime.fromisoformat(cp["started_at"]); day=cp["day"]; hhmm=cp["hhmm"]; run_id=cp["run_id"]; saved=cp.get("results",{})
+        else:
+            now=datetime.now().astimezone(); day=now.strftime("%Y-%m-%d"); hhmm=now.strftime("%H%M"); run_id=f"{day}_{hhmm}"; saved={}
+        def rdir(row): return base/slug(row["account"])/slug(row["retailer"])/day/hhmm
+        done={}
+        for row in rows:
+            k=manifest.build_page_key(row)
+            if _complete(saved.get(k),row,cfg,rdir(row)): done[k]=saved[k]
+        def results(): return [done[manifest.build_page_key(r)] for r in rows if manifest.build_page_key(r) in done]
+        def checkpoint(status): runtime.write_checkpoint({"schema_version":"1.0","status":status,"run_id":run_id,"queue_signature":sig,"started_at":now.isoformat(timespec="seconds"),"day":day,"hhmm":hhmm,"total":len(rows),"results":done})
+        checkpoint("running"); runtime.update_state(status="running",run_id=run_id,resumed=resume,total=len(rows),completed=len(results()),ok=len(results()),failed=0,blocked=0,next_index=1,message=("Resumed interrupted run" if resume else "Capture started"),pid=os.getpid(),output_dir=str(base))
+        stopped=False; lo,hi=cfg["timing"]["between_urls_sec"]
         try:
-            for n, row in enumerate(rows, 1):
-                if not await runtime.wait_for_control():
-                    stopped = True; break
-                runtime.update_state(status="running", current_index=n, next_index=n,
-                                     current_account=row.get("account"), current_retailer=row.get("retailer"),
-                                     current_page=row.get("name"), current_url=row.get("url"),
-                                     message=f"Capturing {row.get('name')}")
-                print(f"[{n}/{len(rows)}] {row['account']} / {row['retailer']} / {row['name']}", flush=True)
-                for attempt in range(cfg["timing"].get("retries", 1) + 1):
-                    r = await capture_one(ctx, row, cfg, run_dir_for(row))
-                    if r["status"] in ("ok", "blocked"):
-                        break
-                report(r); results.append(r)
-                ok_count=sum(x["status"]=="ok" for x in results)
-                failed_count=sum(x["status"] not in ("ok","blocked") for x in results)
-                blocked_count=sum(x["status"]=="blocked" for x in results)
-                runtime.update_state(completed=len(results), ok=ok_count, failed=failed_count,
-                                     blocked=blocked_count, next_index=n+1, last_completed_page=row.get("name"),
-                                     last_completed_account=row.get("account"))
-                # Explicit human-in-the-loop recovery. Browser/profile remain open.
-                if r["status"] == "blocked":
-                    challenge_path=str(run_dir_for(row) / slug(row.get("name","page")) / "blocked.png")
-                    runtime.update_state(status="needs_attention", challenge_url=row.get("url"),
-                                         challenge_screenshot=challenge_path,
-                                         message="Amazon verification detected. Complete it in the open browser, then Resume.")
-                    runtime.notify_attention(
-                        message=f"Amazon verification detected while capturing {row.get('account')} / {row.get('name')}. The run is paused. Complete verification in the capture browser, then click Resume in Retail Capture."
-                    )
-                    print("    !! Amazon verification detected. Capture paused for human review.", flush=True)
-                    if not await runtime.wait_for_control(default_status="running"):
-                        stopped=True; break
-                    # Retry the blocked page once after the operator resumes.
-                    runtime.update_state(status="running", message=f"Retrying {row.get('name')} after verification")
-                    retry = await capture_one(ctx, row, cfg, run_dir_for(row))
-                    report(retry); results[-1]=retry
-                    runtime.update_state(ok=sum(x["status"]=="ok" for x in results),
-                                         failed=sum(x["status"] not in ("ok","blocked") for x in results),
-                                         blocked=sum(x["status"]=="blocked" for x in results))
-                    if retry["status"] == "blocked":
-                        runtime.update_state(status="needs_attention", message="Verification is still present. Complete it and Resume again.")
-                        runtime.notify_attention(title="Retail Capture still needs attention", message="Amazon verification is still present after the retry. The capture remains paused. Complete verification, then Resume again.")
-                        if not await runtime.wait_for_control(default_status="running"):
-                            stopped=True; break
+            for n,row in enumerate(rows,1):
+                key=manifest.build_page_key(row)
+                if key in done: print(f"[{n}/{len(rows)}] SKIP completed: {row['name']}",flush=True); continue
+                if not await runtime.wait_for_control(): stopped=True; break
+                runtime.update_state(status="running",current_index=n,next_index=n,current_account=row.get("account"),current_retailer=row.get("retailer"),current_page=row.get("name"),current_url=row.get("url"),message=f"Capturing {row.get('name')}")
+                for _ in range(cfg["timing"].get("retries",1)+1):
+                    r=await capture_one(ctx,row,cfg,rdir(row))
+                    if r["status"] in ("ok","blocked"): break
+                while r["status"]=="blocked":
+                    runtime.update_state(status="needs_attention",message="Amazon verification detected. Complete it, then Resume."); checkpoint("needs_attention"); runtime.notify_attention()
+                    if not await runtime.wait_for_control(default_status="running"): stopped=True; break
+                    r=await capture_one(ctx,row,cfg,rdir(row))
                 if stopped: break
-                await asyncio.sleep(random.uniform(lo, hi))
-
-            if results:
-                manifest.publish(cfg, base, results, now, event=args.event)
-            final_status = "stopped" if stopped else ("partial" if any(r["status"] != "ok" for r in results) else "complete")
-            runtime.update_state(status=final_status, completed=len(results),
-                                 ok=sum(r["status"]=="ok" for r in results),
-                                 failed=sum(r["status"] not in ("ok","blocked") for r in results),
-                                 blocked=sum(r["status"]=="blocked" for r in results),
-                                 current_account=None, current_page=None, current_url=None,
-                                 completed_at=datetime.now().astimezone().isoformat(timespec="seconds"),
-                                 message="Capture stopped safely" if stopped else "Capture finished")
-            print(f"Done: {sum(r['status']=='ok' for r in results)}/{len(results)} ok. Saved under {base}", flush=True)
+                done[key]=r; checkpoint("running"); manifest.publish(cfg,base,results(),now,event=args.event)
+                rr=results(); runtime.update_state(completed=len(rr),ok=sum(x["status"]=="ok" for x in rr),failed=sum(x["status"] not in ("ok","blocked") for x in rr),blocked=sum(x["status"]=="blocked" for x in rr),next_index=n+1,last_completed_page=row.get("name")); await asyncio.sleep(random.uniform(lo,hi))
+            rr=results()
+            if rr: manifest.publish(cfg,base,rr,now,event=args.event)
+            if stopped: checkpoint("stopped")
+            else: runtime.clear_checkpoint()
+            final="stopped" if stopped else ("partial" if len(rr)!=len(rows) or any(x["status"]!="ok" for x in rr) else "complete")
+            runtime.update_state(status=final,completed=len(rr),ok=sum(x["status"]=="ok" for x in rr),failed=sum(x["status"] not in ("ok","blocked") for x in rr),blocked=sum(x["status"]=="blocked" for x in rr),current_account=None,current_page=None,current_url=None,completed_at=datetime.now().astimezone().isoformat(timespec="seconds"),message=("Capture stopped safely; resume is available" if stopped else "Capture finished"))
         except Exception as exc:
-            runtime.update_state(status="failed", message=str(exc), error=repr(exc),
-                                 completed_at=datetime.now().astimezone().isoformat(timespec="seconds"))
-            raise
+            checkpoint("failed"); runtime.update_state(status="failed",message=str(exc),error=repr(exc)); raise
         finally:
-            await cleanup()
-            runtime.release_lock()
+            await cleanup(); runtime.release_lock()
 
 
 if __name__ == "__main__":
