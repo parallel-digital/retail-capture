@@ -160,6 +160,17 @@ def _page_record(cfg, base, run_dir, result, captured_at):
     }
 
 
+def _read_json(path, default=None):
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return default
+
+
+def _relative(base, path):
+    return Path(path).resolve().relative_to(Path(base).resolve()).as_posix()
+
+
 def _write_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
@@ -324,149 +335,38 @@ def backfill(cfg, base, event=None):
 
 
 def rebuild_manifests(cfg, base, event=None, dry_run=False, warn=print):
-    """Reconcile schema 2.0 manifests with capture artifacts that still exist.
-
-    Filesystem is authoritative for deletions/additions. Existing manifest records
-    remain authoritative for semantic metadata such as page_type and source_url.
-    Capture artifacts are never deleted. dry_run performs no writes.
-    """
-    base = Path(base).resolve()
-    summary = {
-        "runs_scanned": 0, "runs_updated": 0, "runs_removed": 0,
-        "deleted_run_references": 0, "legacy_runs_skipped": 0,
-        "pages_retained": 0, "pages_removed": 0, "pages_added": 0,
-        "clips_retained": 0, "clips_removed": 0, "clips_added": 0,
-        "warnings": [],
-    }
-
-    def note(message):
-        summary["warnings"].append(message)
-        if warn:
-            try: warn(message)
-            except Exception: pass
-
-    event_path = base / "event-manifest.json"
-    old_index = _read_json(event_path, {}) if event_path.exists() else {}
-    old_run_ids = {r.get("run_id") for r in old_index.get("runs", []) if r.get("run_id")}
-    live_run_ids = set()
-
+    """Reconcile schema 2.0 manifests with capture files; never delete capture artifacts."""
+    base=Path(base).resolve()
+    out={"runs_scanned":0,"runs_updated":0,"runs_removed":0,"deleted_run_references":0,"legacy_runs_skipped":0,"pages_retained":0,"pages_removed":0,"pages_added":0,"clips_retained":0,"clips_removed":0,"clips_added":0,"warnings":[]}
+    idx=_read_json(base/"event-manifest.json",{}) or {}; old_ids={r.get("run_id") for r in idx.get("runs",[]) if isinstance(r,dict) and r.get("run_id")}; live=set()
     for mp in sorted(base.glob("*/*/*/*/manifest.json")):
-        summary["runs_scanned"] += 1
-        old = _read_json(mp, None)
-        if not isinstance(old, dict) or not isinstance(old.get("pages"), list):
-            summary["legacy_runs_skipped"] += 1
-            note(f"Skipped unreadable or legacy manifest: {mp}")
-            continue
-        if str(old.get("schema_version") or "") != "2.0":
-            summary["legacy_runs_skipped"] += 1
-            note(f"Skipped non-2.0 manifest: {mp}")
-            continue
-
-        run_dir = mp.parent
-        live_run_ids.add(old.get("run_id"))
-        old_pages = old.get("pages", [])
-        by_folder = {str(p.get("page_folder") or p.get("label") or ""): p for p in old_pages}
-        by_label_slug = {slug(p.get("label") or ""): p for p in old_pages if p.get("label")}
-        surviving = []
-        seen_old = set()
-
-        page_dirs = sorted(p for p in run_dir.iterdir() if p.is_dir() and (p / "full.png").exists())
-        for folder in page_dirs:
-            prior = by_folder.get(folder.name) or by_label_slug.get(folder.name)
-            is_added = prior is None
-            if prior:
-                seen_old.add(id(prior))
-                page = dict(prior)
+        out["runs_scanned"]+=1; old=_read_json(mp)
+        if not isinstance(old,dict) or str(old.get("schema_version"))!="2.0" or not isinstance(old.get("pages"),list):
+            out["legacy_runs_skipped"]+=1; out["warnings"].append(f"Skipped unreadable or legacy manifest: {mp}"); continue
+        if old.get("run_id"): live.add(old["run_id"])
+        run=mp.parent; oldpages=old["pages"]; byfolder={str(x.get("page_folder") or ""):x for x in oldpages}; byslug={slug(x.get("label") or ""):x for x in oldpages if x.get("label")}; matched=set(); pages=[]
+        for folder in sorted(x for x in run.iterdir() if x.is_dir() and (x/"full.png").exists()):
+            prior=byfolder.get(folder.name) or byslug.get(folder.name)
+            if prior: page=dict(prior); matched.add(id(prior))
             else:
-                page = {
-                    "schema_version": "2.0",
-                    "page_id": f"{old.get('run_id')}:{folder.name}",
-                    "page_key": folder.name,
-                    "label": folder.name,
-                    "page_type": "other",
-                    "source_url": None,
-                    "final_url": None,
-                    "title": None,
-                    "status": "ok",
-                    "captured_at": old.get("captured_at"),
-                    "data_extraction_status": None,
-                    "data_record_count": None,
-                    "data_extraction_error": None,
-                    "clip_report": {},
-                    "error": None,
-                }
-                summary["pages_added"] += 1
-            page["page_folder"] = folder.name
-            rel_folder = _relative(base, folder)
-            page["page_folder_url"] = _sharepoint_url(cfg, rel_folder)
-            full = folder / "full.png"
-            width, height, size = _image_info(full)
-            rel_full = _relative(base, full)
-            page["full_page"] = {"file": full.name, "rel_path": rel_full,
-                                  "file_url": _sharepoint_url(cfg, rel_full)}
-            page["image_file_name"] = full.name
-            page["image_relative_path"] = rel_full
-            page["image_sharepoint_url"] = _sharepoint_url(cfg, rel_full)
-            page["image_width"] = width; page["image_height"] = height; page["file_size_bytes"] = size
-
-            for key, filename in (("html", "page.html"), ("page_data", "page-data.json")):
-                f = folder / filename
-                if f.exists():
-                    rel = _relative(base, f)
-                    page[key] = {"file": filename, "rel_path": rel, "file_url": _sharepoint_url(cfg, rel)}
-                else:
-                    page[key] = None
-            html = folder / "page.html"
-            pdata = folder / "page-data.json"
-            page["html_file_name"] = html.name if html.exists() else None
-            page["html_relative_path"] = _relative(base, html) if html.exists() else None
-            page["html_sharepoint_url"] = _sharepoint_url(cfg, _relative(base, html)) if html.exists() else None
-            page["page_data_file_name"] = pdata.name if pdata.exists() else None
-            page["page_data_relative_path"] = _relative(base, pdata) if pdata.exists() else None
-            page["page_data_sharepoint_url"] = _sharepoint_url(cfg, _relative(base, pdata)) if pdata.exists() else None
-
-            old_clips = {c.get("file"): c for c in (page.get("clips") or []) if c.get("file")}
-            clip_dir = folder / "clips"
-            files = sorted(clip_dir.glob("*.png")) if clip_dir.exists() else []
-            new_clips = []
+                out["pages_added"]+=1; page={"page_key":folder.name,"page_id":f"{old.get('run_id')}:{folder.name}","page_type":"other","label":folder.name,"account":old.get("account"),"retailer":old.get("retailer"),"source_url":None,"final_url":None,"page_title":None,"search_term":None,"asin":None,"competitor":None,"status":"ok","captured_at":old.get("captured_at"),"clip_report":{},"error":None}
+            out["pages_retained"]+=1; page["page_folder"]=folder.name; page["page_folder_url"]=_sharepoint_url(cfg,_relative(base,folder))
+            full=folder/"full.png"; rel=_relative(base,full); w,h,z=_image_info(full); page.update({"image_file_name":"full.png","image_relative_path":rel,"image_sharepoint_url":_sharepoint_url(cfg,rel),"image_width":w,"image_height":h,"file_size_bytes":z})
+            for prefix,name in (("html","page.html"),("page_data","page-data.json")):
+                f=folder/name; rr=_relative(base,f) if f.exists() else None; page[f"{prefix}_file_name"]=name if rr else None; page[f"{prefix}_relative_path"]=rr; page[f"{prefix}_sharepoint_url"]=_sharepoint_url(cfg,rr) if rr else None
+            oldclips={c.get("file") or c.get("image_file_name"):c for c in page.get("clips",[]) if c.get("file") or c.get("image_file_name")}; files=sorted((folder/"clips").glob("*.png")) if (folder/"clips").exists() else []; clips=[]
             for cf in files:
-                prior_clip = old_clips.get(cf.name)
-                clip = dict(prior_clip) if prior_clip else {"file": cf.name, "source": "filesystem-rebuild"}
-                rel = _relative(base, cf)
-                clip["rel_path"] = rel
-                clip["file_url"] = _sharepoint_url(cfg, rel)
-                new_clips.append(clip)
-                if prior_clip: summary["clips_retained"] += 1
-                else: summary["clips_added"] += 1
-            summary["clips_removed"] += len(set(old_clips) - {f.name for f in files})
-            page["clips"] = new_clips
-            surviving.append(page)
-            summary["pages_retained"] += 1
-
-        summary["pages_removed"] += sum(1 for p in old_pages if id(p) not in seen_old)
-        if not surviving:
-            summary["runs_removed"] += 1
-            if not dry_run:
-                try: mp.unlink()
-                except OSError as exc: note(f"Could not remove empty run manifest {mp}: {exc}")
+                pc=oldclips.get(cf.name); c=dict(pc) if pc else {"file":cf.name,"source":"filesystem-rebuild"}; out["clips_retained" if pc else "clips_added"]+=1; rr=_relative(base,cf); cw,ch,cz=_image_info(cf); c.update({"file":cf.name,"image_file_name":cf.name,"image_relative_path":rr,"image_sharepoint_url":_sharepoint_url(cfg,rr),"image_width":cw,"image_height":ch,"file_size_bytes":cz}); clips.append(c)
+            out["clips_removed"]+=len(set(oldclips)-{x.name for x in files}); page["clips"]=clips; pages.append(page)
+        out["pages_removed"]+=sum(id(x) not in matched for x in oldpages)
+        if not pages:
+            out["runs_removed"]+=1
+            if not dry_run: mp.unlink(missing_ok=True)
             continue
-
-        new = dict(old)
-        new["pages"] = surviving
-        new["page_count"] = len(surviving)
-        new["pages_ok"] = sum(p.get("status") == "ok" for p in surviving)
-        new["pages_failed"] = len(surviving) - new["pages_ok"]
-        new["page_types"] = sorted({p.get("page_type") or "other" for p in surviving})
-        new["status"] = "ok" if new["pages_failed"] == 0 else ("failed" if new["pages_ok"] == 0 else "partial")
-        rel_manifest = _relative(base, mp)
-        new["manifest_url"] = _sharepoint_url(cfg, rel_manifest)
-        if new != old:
-            summary["runs_updated"] += 1
-            if not dry_run:
-                _write_json(mp, new)
-
-    missing_ids = {x for x in old_run_ids - live_run_ids if x}
-    summary["deleted_run_references"] = len(missing_ids)
-    if not dry_run:
-        rebuild_event_manifest(cfg, base, event)
-    return summary
+        new=dict(old); new["pages"]=pages; new["page_count"]=len(pages); new["pages_ok"]=sum(x.get("status")=="ok" for x in pages); new["pages_failed"]=len(pages)-new["pages_ok"]; new["page_types"]=sorted({x.get("page_type") or "other" for x in pages}); new["status"]="ok" if new["pages_failed"]==0 else ("failed" if new["pages_ok"]==0 else "partial")
+        if new!=old:
+            out["runs_updated"]+=1
+            if not dry_run: _write_json(mp,new)
+    out["deleted_run_references"]=len(old_ids-live)
+    if not dry_run: rebuild_event_manifest(cfg,base,event)
+    return out
