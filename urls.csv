@@ -1,5 +1,10 @@
-account,url,retailer,page_type,name
-Account A,https://www.amazon.com/gp/bestsellers/,amazon,bestsellers,amazon-bestsellers
-Account A,https://www.amazon.com/s?k=wireless+earbuds,amazon,search,amazon-search-earbuds
-Account B,https://www.amazon.com/deals,amazon,deals,amazon-deals
-Account B,https://www.walmart.com/shop/deals,walmart,deals,walmart-deals
+﻿account,url,retailer,page_type,name
+All,https://www.bestbuy.com/site/misc/deal-of-the-day/pcmcat248000050016.c?id=pcmcat248000050016,Best Buy,daily_deals,Deal of the Day
+All,https://www.bestbuy.com/,Best Buy,homepage,Global Home Page
+All,https://www.bestbuy.com/black-friday,Best Buy,deal_page,Deal - Top Deals Black Friday
+All,https://www.bestbuy.com/site/all-electronics-on-sale/all-tv-home-theater-on-sale/pcmcat1690836748285.c?id=pcmcat1690836748285,Best Buy,deal_page,Deal - TV and Home Theater
+All,https://www.bestbuy.com/site/all-electronics-on-sale/headphones-on-sale/pcmcat1720706915460.c?id=pcmcat1720706915460,Best Buy,deal_page,Deal - Headphones
+All,https://www.target.com/c/target-deal-of-the-day/-/N-2sbk4,Target,daily_deals,Deal of the Day
+All,https://www.target.com/,Target,homepage,Global Home Page
+All,https://www.target.com/weekly-ad?promo=Target-20261115,Target,deal_page,Weekly Ad
+All,https://www.target.com/c/home-sale/-/N-4u97i,Target,deal_page,Deal - Home Deals

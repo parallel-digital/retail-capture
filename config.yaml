@@ -1,10 +1,11 @@
 # Where runs are saved. Point this at a synced OneDrive/SharePoint folder if you like.
-output_dir: output
+output_dir: 'C:\Users\BrianWeber\Parallel Sales\Parallel Retail - Documents\z_Screenshots'
 
 # Event name written into manifests. Blank = the name of the save folder above (e.g. "T12 2026").
-event: ""
+event: "Black Friday 2026"
 # Optional capture phase: baseline, pre_event, live_event, post_event. Blank = null.
 event_phase: ""
+storage_layout: retailer_event_account
 
 # Used to turn saved files into SharePoint links (file_url). Blank = auto-detected from the OneDrive sync client.
 # Only set these if links are missing: local_root = the synced folder on this PC, url_base = its SharePoint URL.
@@ -81,3 +82,21 @@ clips:
     - {name: from-the-manufacturer, heading: "From the manufacturer", wait_ms: 2000, save_html_on_miss: true}
   brand_store:
     - {name: hero, selector: "[class*='hero'], [id*='hero']", max: 1}
+
+retailer_clips:
+  best_buy:
+    homepage:
+      - {name: hero, selector: "main section:has(h1), main [class*='hero']", max: 2, save_html_on_miss: true}
+      - {name: promo-module, selector: "main [class*='promo'], main [class*='feature']", max: 6}
+    daily_deals:
+      - {name: deal-card, selector: "li.sku-item, [data-testid='product-card'], .shop-sku-list-item", max: 10, wait_ms: 350, save_html_on_miss: true}
+    deal_page:
+      - {name: product-card, selector: "li.sku-item, [data-testid='product-card'], .shop-sku-list-item", max: 10, wait_ms: 350, save_html_on_miss: true}
+  target:
+    homepage:
+      - {name: hero, selector: "main [data-test*='hero'], main section:has(h1)", max: 2, save_html_on_miss: true}
+      - {name: promo-module, selector: "main [data-test*='story'], main [data-test*='promotion']", max: 6}
+    daily_deals:
+      - {name: product-card, selector: "[data-test='product-card'], [data-testid='product-card'], div[data-test='@web/site-top-of-funnel/ProductCardWrapper']", max: 10, wait_ms: 350, save_html_on_miss: true}
+    deal_page:
+      - {name: product-card, selector: "[data-test='product-card'], [data-testid='product-card'], div[data-test='@web/site-top-of-funnel/ProductCardWrapper']", max: 10, wait_ms: 350, save_html_on_miss: true}

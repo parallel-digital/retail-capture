@@ -1,5 +1,5 @@
 """Streamlit front end: import URLs, run captures, browse results, crop manually."""
-import os, re, subprocess, sys
+import os, re, subprocess, sys, json
 from pathlib import Path
 
 import pandas as pd
@@ -51,12 +51,16 @@ def runs():
     r = out_root()
     if not r.exists():
         return []
-    found = [p for p in r.glob("*/*/*/*") if p.is_dir() and any(p.glob("*/full.png"))]
-    return sorted(found, key=lambda p: (p.parent.name, p.name), reverse=True)
+    found = [p.parent for p in r.glob("**/manifest.json") if any(p.parent.glob("*/full.png"))]
+    return sorted(set(found), key=lambda p: (p.parent.name, p.name), reverse=True)
 
 
+def run_meta(p):
+    try: return json.loads((p / "manifest.json").read_text(encoding="utf-8"))
+    except Exception: return {}
 def run_label(p):
-    return f"{p.parent.parent.parent.name} | {p.parent.parent.name} | {p.parent.name} {p.name}"
+    m=run_meta(p)
+    return f"{m.get('retailer') or 'Retailer'} | {m.get('event') or 'Event'} | {m.get('account') or 'Account'} | {m.get('capture_date') or p.parent.name} {m.get('capture_time') or p.name}"
 
 
 def clean(df):
@@ -92,7 +96,7 @@ def render_live_status():
     status = state.get("status", "idle")
     active = status in {"starting", "running", "paused", "needs_attention", "stopping"}
     st.subheader("Live capture status")
-    labels = {"running":"RUNNING", "paused":"PAUSED", "needs_attention":"AMAZON NEEDS ATTENTION",
+    labels = {"running":"RUNNING", "paused":"PAUSED", "needs_attention":"RETAILER NEEDS ATTENTION",
               "stopping":"STOPPING", "complete":"COMPLETE", "partial":"PARTIAL", "failed":"FAILED",
               "stopped":"STOPPED", "starting":"STARTING", "skipped_busy":"SKIPPED - ALREADY RUNNING", "idle":"IDLE"}
     st.markdown(f"### {labels.get(status, status.upper())}")
@@ -105,7 +109,7 @@ def render_live_status():
     if state.get("current_account"): st.write(f"**Current:** {state.get('current_account')} | {state.get('current_page')}")
     if state.get("message"): st.info(state["message"])
     if status == "needs_attention":
-        st.warning("Complete Amazon's verification in the browser window opened by the capture worker. Do not close that browser. Then click Resume.")
+        st.warning("Complete the retailer verification in the browser window opened by the capture worker. Do not close that browser. Then click Resume.")
         st.caption("A Windows desktop alert also appears when verification is detected, even if this browser tab is hidden or closed.")
         if state.get("challenge_screenshot") and Path(state["challenge_screenshot"]).exists():
             st.caption(f"Challenge evidence saved: {state['challenge_screenshot']}")
@@ -156,7 +160,7 @@ with tab_run:
             st.error(f"Couldn't read that file: {e}")
 
     st.subheader("URL list")
-    types = ", ".join(load_cfg().get("clips", {}).keys())
+    c=load_cfg(); types = ", ".join(sorted(set((c.get("clips", {}) or {}).keys()) | {pt for r in (c.get("retailer_clips", {}) or {}).values() for pt in (r or {}).keys()}))
     st.caption(f"page_type values that get auto-clips: {types}. Anything else gets the full-page image only.")
     edited = st.data_editor(st.session_state.urls, num_rows="dynamic", key=f"ed{st.session_state.ver}")
     norm = clean(edited)
@@ -188,19 +192,18 @@ with tab_run:
         st.rerun()
 
 def pick_run(prefix):
-    """Account > retailer > date/time pickers; returns the chosen run folder (or None)."""
-    rs = runs()
-    if not rs:
-        st.info("No runs yet.")
-        return None
-    c1, c2, c3 = st.columns(3)
-    acct = c1.selectbox("Account", sorted({p.parent.parent.parent.name for p in rs}), key=prefix + "a")
-    rets = sorted({p.parent.parent.name for p in rs if p.parent.parent.parent.name == acct})
-    ret = c2.selectbox("Retailer", rets, key=prefix + "r")
-    cands = [p for p in rs if p.parent.parent.parent.name == acct and p.parent.parent.name == ret]
-    return c3.selectbox("Date / time", cands, format_func=lambda p: f"{p.parent.name} {p.name}", key=prefix + "t")
-
-
+    """Retailer > event > account > date/time picker backed by manifest metadata."""
+    rs=runs()
+    if not rs: st.info("No runs yet."); return None
+    data=[(p,run_meta(p)) for p in rs]
+    c1,c2,c3,c4=st.columns(4)
+    retailer=c1.selectbox("Retailer",sorted({m.get("retailer") or "Other" for _,m in data}),key=prefix+"r")
+    events=sorted({m.get("event") or "Baseline" for _,m in data if (m.get("retailer") or "Other")==retailer})
+    event=c2.selectbox("Event",events,key=prefix+"e")
+    accounts=sorted({m.get("account") or "unassigned" for _,m in data if (m.get("retailer") or "Other")==retailer and (m.get("event") or "Baseline")==event})
+    account=c3.selectbox("Account",accounts,key=prefix+"a")
+    cands=[p for p,m in data if (m.get("retailer") or "Other")==retailer and (m.get("event") or "Baseline")==event and (m.get("account") or "unassigned")==account]
+    return c4.selectbox("Date / time",cands,format_func=lambda p: f"{run_meta(p).get('capture_date') or p.parent.name} {run_meta(p).get('capture_time') or p.name}",key=prefix+"t")
 with tab_gal:
     run = pick_run("g")
     if run:

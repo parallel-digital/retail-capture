@@ -53,3 +53,10 @@ Windows session (screen can be locked only if the PC isn't set to sleep).
   folder mapping; set `sharepoint.local_root` / `sharepoint.url_base` in config.yaml only if links are missing.
 - Runs made before this feature: `RetailCapture.exe --capture --backfill` (or `python capture.py --backfill`).
 - Tests: `python tests/test_manifests.py`
+
+
+### Best Buy / Target profile
+- Launch: `RetailCapture.exe --profile bby-target`
+- Output: `<save folder>/<retailer>/<event>/<account>/<date>/<time>/<page>/`
+- Run One-time browser setup once to establish Best Buy and Target ZIP/store preferences.
+- Amazon remains on the default profile and retains its original layout.
